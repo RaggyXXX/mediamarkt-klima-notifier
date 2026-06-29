@@ -22,6 +22,8 @@ services:
         sync: false                # Ziel-Kanal-ID fuer Bot-Variante
       - key: DISCORD_MENTION
         value: ""                  # leer | "everyone" | "here"  -> optionaler Ping
+      - key: DISCORD_PUBLIC_KEY
+        value: decb18aa4317a68aa9eed041acbf7b559dbe297038f8bdff83e779a20c7820dc  # Public Key (nicht geheim) fuer Slash-Command-Signatur
       - key: PRODUCT_URL
         value: https://www.mediamarkt.de/de/product/_ok-oac-7022-w-klimagerat-weiss-max-raumgrosse-67-m-2763143.html
       - key: SKU

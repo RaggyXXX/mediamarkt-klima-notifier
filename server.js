@@ -11,9 +11,12 @@
 //      wieder verfuegbar -> wieder alle
 //  - dynamisches Abo: wer dem Bot schreibt, wird automatisch aufgenommen
 //
-//  Endpoints:  GET /  (Health/Keepalive) | GET /check | GET /getchatid
+//  Endpoints:  GET / | GET /walkietalkie | GET /check | GET /getchatid
+//              POST /interactions  (Discord Slash-Commands)
 // =====================================================================
 import http from 'node:http';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
 
 const env = process.env;
 const PORT            = env.PORT || 10000;
@@ -23,7 +26,23 @@ const DISCORD_WEBHOOK = env.DISCORD_WEBHOOK_URL || '';            // Discord-Kan
 const DISCORD_BOT_TOKEN  = env.DISCORD_BOT_TOKEN || '';           // Bot-Token (Variante 2, REST)
 const DISCORD_CHANNEL_ID = env.DISCORD_CHANNEL_ID || '';          // Ziel-Kanal-ID fuer Bot-Variante
 const DISCORD_MENTION = (env.DISCORD_MENTION || '').trim();       // z.B. "everyone" oder "here" (optional Ping)
-const DISCORD_ON = !!DISCORD_WEBHOOK || !!(DISCORD_BOT_TOKEN && DISCORD_CHANNEL_ID);
+const DISCORD_PUBLIC_KEY = env.DISCORD_PUBLIC_KEY || '';          // fuer Slash-Command-Signaturpruefung
+const DISCORD_ON = !!DISCORD_BOT_TOKEN;   // per-User-DMs via Bot
+
+// 10 dumme, aber witzige Sprueche fuer die Verfuegbarkeits-Meldung
+const FUNNY = [
+  'Mein lieber Herrgesangsverein! Ich glaube, ein neues Erfrischungsgerät ist verfügbar. Howdy! 🤠',
+  'Alaaarm! Die Wettermaschine ist gelandet. Schnapp sie dir, bevor\'s wieder schwül wird! 🥵',
+  'Tatütata, die Klima-Feuerwehr! Das Gerät ist lieferbar — losdüsen! 🚒',
+  'Heiliger Bimbam, kühle Brise im Anflug! Verfügbar. Zack zack, sonst weg! ❄️',
+  'Achtung, der Eisbär ruft: Klimaanlage verfügbar — schlag zu, du Frostbeule! 🐻‍❄️',
+  'Donnerwetter! Frische Luft auf Lager. Bestell jetzt, sonst schmilzt der Deal! 🫠',
+  'Hört, hört! Die Pustemaschine steht im Laden. Husch husch zur Kasse! 💨',
+  'Sapperlot, da isse! Dein persönlicher Sommer-Feind ist verfügbar. Angriff! ⚔️',
+  'Yeehaw! Die Cool-Down-Kanone ist geladen und lieferbar. Nicht trödeln, Cowboy! 🤠',
+  'Breaking News: Klimagerät gesichtet! Experten raten: sofort kaufen. 📰❄️',
+];
+const pickFunny = () => FUNNY[Math.floor(Math.random()*FUNNY.length)];
 const PRODUCT_URL     = env.PRODUCT_URL ||
   'https://www.mediamarkt.de/de/product/_ok-oac-7022-w-klimagerat-weiss-max-raumgrosse-67-m-2763143.html';
 const SKU             = env.SKU || '2763143';
@@ -48,6 +67,7 @@ const subscribers = new Set(CHAT_IDS);   // Empfaenger (Env + dynamisch)
 const notified    = new Set();           // wer im AKTUELLEN Fenster schon benachrichtigt wurde
 let wasAvailable = false;
 let goneStreak = 0;
+let availLine = '';          // gewaehlter Spruch fuers aktuelle Verfuegbarkeits-Fenster
 let last = null, errStreak = 0, tgOffset = 0, checking = false;
 
 // ---------- Telegram ----------
@@ -61,10 +81,13 @@ async function tgSend(chatId, text){
     if(!r.ok) console.log('[tg] HTTP', r.status, await r.text());
   }catch(e){ console.log('[tg]', e.message); }
 }
+function availText(){
+  return `${availLine || pickFunny()}\n\n🟢 Jetzt kaufbar:\n${PRODUCT_URL}\n⚡ SCHNELL – ist meist in <1 Min weg!`;
+}
 async function broadcastAvailable(){
   for(const id of subscribers){
     if(!notified.has(id)){
-      await tgSend(id, `🟢 VERFÜGBAR! Jetzt kaufbar:\n${PRODUCT_URL}\n\n⚡ SCHNELL – ist meist in <1 Min weg!`);
+      await tgSend(id, availText());
       notified.add(id);
     }
   }
@@ -73,27 +96,42 @@ async function broadcastGone(){
   for(const id of subscribers) await tgSend(id, `🔴 Wieder ausverkauft. Du wirst beim nächsten Mal automatisch erneut benachrichtigt.`);
 }
 
-// ---------- Discord (Kanal-Webhook, 1 Nachricht pro Zustandswechsel) ----------
-async function discordSend(text){
-  if(!DISCORD_ON) return;
-  const body = { content: text, allowed_mentions: { parse: [] } };
-  if(DISCORD_MENTION === 'everyone' || DISCORD_MENTION === 'here'){
-    body.content = `@${DISCORD_MENTION} ` + text;
-    body.allowed_mentions = { parse: [DISCORD_MENTION] };
-  }
+// ---------- Discord: per-User-Abo (/notifyme) + DM bei Verfuegbarkeit ----------
+const SUBS_FILE = './discord_subs.json';
+const discordSubs = new Set(loadSubs());          // Discord-User-IDs
+const notifiedDiscord = new Set();                // wer im aktuellen Fenster schon eine DM hat
+function loadSubs(){ try{ return JSON.parse(fs.readFileSync(SUBS_FILE,'utf8')); }catch{ return []; } }
+function saveSubs(){ try{ fs.writeFileSync(SUBS_FILE, JSON.stringify([...discordSubs])); }catch(e){ console.log('[subs] save', e.message); } }
+
+const dHeaders = () => ({ authorization:`Bot ${DISCORD_BOT_TOKEN}`, 'content-type':'application/json' });
+async function discordDM(userId, text){
+  if(!DISCORD_BOT_TOKEN) return false;
   try{
-    let r;
-    if(DISCORD_WEBHOOK){                                  // Variante 1: Webhook
-      r = await fetch(DISCORD_WEBHOOK,{ method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(body) });
-    } else {                                              // Variante 2: Bot-REST
-      r = await fetch(`https://discord.com/api/v10/channels/${DISCORD_CHANNEL_ID}/messages`,{
-        method:'POST',
-        headers:{ 'content-type':'application/json', authorization:`Bot ${DISCORD_BOT_TOKEN}` },
-        body: JSON.stringify(body)
-      });
+    const chRes = await fetch('https://discord.com/api/v10/users/@me/channels',{ method:'POST', headers:dHeaders(), body:JSON.stringify({ recipient_id:userId }) });
+    const ch = await chRes.json();
+    if(!ch.id){ console.log('[dm] kein Kanal fuer', userId, JSON.stringify(ch).slice(0,120)); return false; }
+    const r = await fetch(`https://discord.com/api/v10/channels/${ch.id}/messages`,{ method:'POST', headers:dHeaders(), body:JSON.stringify({ content:text }) });
+    if(!r.ok){ console.log('[dm] HTTP', r.status, await r.text()); return false; }
+    return true;
+  }catch(e){ console.log('[dm]', e.message); return false; }
+}
+async function dmDiscordSubs(){
+  for(const uid of discordSubs){
+    if(!notifiedDiscord.has(uid)){
+      const ok = await discordDM(uid, availText());
+      if(ok) notifiedDiscord.add(uid);
     }
-    if(!r.ok) console.log('[discord] HTTP', r.status, await r.text());
-  }catch(e){ console.log('[discord]', e.message); }
+  }
+}
+
+// Discord-Interaktions-Signatur (Ed25519) pruefen
+function verifyDiscordSig(sig, ts, rawBody){
+  if(!DISCORD_PUBLIC_KEY || !sig || !ts) return false;
+  try{
+    const der = Buffer.concat([ Buffer.from('302a300506032b6570032100','hex'), Buffer.from(DISCORD_PUBLIC_KEY,'hex') ]);
+    const key = crypto.createPublicKey({ key:der, format:'der', type:'spki' });
+    return crypto.verify(null, Buffer.from(ts + rawBody), key, Buffer.from(sig,'hex'));
+  }catch(e){ console.log('[verify]', e.message); return false; }
 }
 
 // ---------- EIN Abruf (KEIN Cache-Busting -> stabiler, korrekter Status) ----------
@@ -140,16 +178,17 @@ async function check(){
       errStreak = 0;
       if(available){
         const becameAvailable = !wasAvailable;     // echter Zustandswechsel?
+        if(becameAvailable) availLine = pickFunny();  // pro Fenster EIN Spruch
         wasAvailable = true; goneStreak = 0;
         await broadcastAvailable();                 // Telegram: alle noch nicht informierten User
-        if(becameAvailable) await discordSend(`🟢 **VERFÜGBAR!** Jetzt kaufbar:\n${PRODUCT_URL}\n⚡ Schnell – meist in <1 Min weg!`);
+        await dmDiscordSubs();                      // Discord: alle Abonnenten (jeder 1x pro Fenster)
       } else {
         // Hysterese: erst nach GONE_CONFIRM Checks "weg" in Folge re-armen
         goneStreak++;
         if(goneStreak >= GONE_CONFIRM){
-          if(wasAvailable){ await broadcastGone(); await discordSend('🔴 Wieder ausverkauft.'); }
+          if(wasAvailable){ await broadcastGone(); }
           wasAvailable = false;
-          notified.clear();                // re-arm: naechstes Mal wieder alle
+          notified.clear(); notifiedDiscord.clear();   // re-arm: naechstes Mal wieder alle (Telegram + Discord)
         }
       }
     }
@@ -195,6 +234,31 @@ pollUpdates().catch(()=>{});
 const server = http.createServer(async (req,res)=>{
   const url = new URL(req.url, 'http://x');
   const json = (code,obj)=>{ res.writeHead(code,{'content-type':'application/json'}); res.end(JSON.stringify(obj,null,1)); };
+  // ---------- Discord Slash-Commands ----------
+  if(url.pathname === '/interactions' && req.method === 'POST'){
+    const sig = req.headers['x-signature-ed25519'];
+    const ts  = req.headers['x-signature-timestamp'];
+    let raw=''; for await (const chunk of req) raw += chunk;
+    if(!verifyDiscordSig(sig, ts, raw)){ res.writeHead(401); return res.end('invalid request signature'); }
+    let body={}; try{ body = JSON.parse(raw); }catch{}
+    if(body.type === 1) return json(200, { type:1 });                 // PING -> PONG
+    if(body.type === 2){                                              // Slash-Command
+      const name = body.data && body.data.name;
+      const userId = (body.member && body.member.user && body.member.user.id) || (body.user && body.user.id);
+      let content;
+      if(name === 'notifyme'){
+        if(userId){ discordSubs.add(userId); saveSubs(); }
+        content = '✅ Eingetragen! Sobald die Klimaanlage lieferbar ist, kriegst du von mir eine DM. 🌬️🤠';
+      } else if(name === 'unnotifyme'){
+        if(userId){ discordSubs.delete(userId); notifiedDiscord.delete(userId); saveSubs(); }
+        content = '🔕 Abgemeldet. Keine Klima-Meldungen mehr für dich.';
+      } else {
+        content = 'Unbekannter Befehl.';
+      }
+      return json(200, { type:4, data:{ content, flags:64 } });        // ephemerale Antwort (nur fuer den User)
+    }
+    return json(200, { type:1 });
+  }
   if(url.pathname === '/walkietalkie') return json(200, { awake:true, t:new Date().toISOString() }); // Stay-Awake-Ping (cron-job.org)
   if(url.pathname === '/check')     return json(200, await check().catch(e=>({error:e.message})));
   if(url.pathname === '/getchatid'){
@@ -209,7 +273,8 @@ const server = http.createServer(async (req,res)=>{
   // Health / Keepalive-Ziel
   return json(200,{ ok:true, product:PRODUCT_URL, idleSec:IDLE_SEC, activeSec:ACTIVE_SEC,
                     verify:`${CONFIRM_PROBES}x${CONFIRM_GAP_MS}ms`, currentlyAvailable:wasAvailable,
-                    subscribers:subscribers.size, telegram:!!BOT_TOKEN, discord:DISCORD_ON,
+                    telegramSubs:subscribers.size, discordSubs:discordSubs.size,
+                    telegram:!!BOT_TOKEN, discord:DISCORD_ON, slash:!!DISCORD_PUBLIC_KEY,
                     selfWakeup:!!SELF_URL, last });
 });
 server.listen(PORT, ()=>console.log(`Notifier auf :${PORT} | idle ${IDLE_SEC}s / active ${ACTIVE_SEC}s | verify ${CONFIRM_PROBES}x${CONFIRM_GAP_MS}ms | telegram ${!!BOT_TOKEN} | discord ${DISCORD_ON} | selfWakeup ${!!SELF_URL}`));
