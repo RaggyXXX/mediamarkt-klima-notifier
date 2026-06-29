@@ -176,13 +176,14 @@ async function loop(){
 loop();
 
 setInterval(()=>pollUpdates().catch(()=>{}), UPDATES_SEC*1000);
-if(SELF_URL) setInterval(()=>fetch(SELF_URL.replace(/\/$/,'')+'/').catch(()=>{}), KEEPALIVE_MIN*60*1000);
+if(SELF_URL) setInterval(()=>fetch(SELF_URL.replace(/\/$/,'')+'/walkietalkie').catch(()=>{}), KEEPALIVE_MIN*60*1000);
 pollUpdates().catch(()=>{});
 
 // ---------- HTTP ----------
 const server = http.createServer(async (req,res)=>{
   const url = new URL(req.url, 'http://x');
   const json = (code,obj)=>{ res.writeHead(code,{'content-type':'application/json'}); res.end(JSON.stringify(obj,null,1)); };
+  if(url.pathname === '/walkietalkie') return json(200, { awake:true, t:new Date().toISOString() }); // Stay-Awake-Ping (cron-job.org)
   if(url.pathname === '/check')     return json(200, await check().catch(e=>({error:e.message})));
   if(url.pathname === '/getchatid'){
     if(!BOT_TOKEN) return json(400,{error:'BOT_TOKEN fehlt'});

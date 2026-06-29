@@ -64,10 +64,10 @@ damit funktioniert der Self-Wakeup automatisch.
 ## 4) (Optional) Externer Cron als Notnetz
 Self-Wakeup reicht normalerweise. Falls der Dienst doch mal komplett einschläft
 (z. B. nach Deploy/Crash) und sich nicht selbst wecken kann, leg bei **cron-job.org**
-einen Ping auf `…/` alle ~12 Min an. Reiner Sicherheitsgurt.
+einen Ping auf `…/walkietalkie` alle ~12 Min an. Reiner Sicherheitsgurt.
 
 ## Endpoints
-`GET /` Health/Keepalive · `GET /check` manuelle Prüfung · `GET /getchatid` Chat-IDs anzeigen
+`GET /` Health · `GET /walkietalkie` Stay-Awake-Ping (für cron-job.org) · `GET /check` manuelle Prüfung · `GET /getchatid` Chat-IDs anzeigen
 
 ## Ehrliche Grenzen
 - Der Artikel **flackert real** (mal lieferbar, mal nicht, im Sekundentakt). Der Bot meldet bei einem
