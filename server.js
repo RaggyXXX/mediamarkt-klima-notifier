@@ -69,6 +69,7 @@ let db = null;
 const dbSet = (k,v) => { if(db) try{ db.prepare('INSERT INTO stats(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(k,String(v)); }catch{} };
 const dbGet = (k)   => { if(!db) return null; try{ const r=db.prepare('SELECT value FROM stats WHERE key=?').get(k); return r?r.value:null; }catch{ return null; } };
 const dbInc = (k)   => { const v=(parseInt(dbGet(k)||'0',10)||0)+1; dbSet(k,v); return v; };
+const dbAdd = (k,n) => { const v=(parseFloat(dbGet(k)||'0')||0)+(n||0); dbSet(k,v); return v; };
 const dbEvent = (type,info='') => { if(db) try{ db.prepare('INSERT INTO events(ts,type,info) VALUES(?,?,?)').run(new Date().toISOString(),type,info); }catch{} };
 const dbAll = (sql,...a) => { if(!db) return []; try{ return db.prepare(sql).all(...a); }catch{ return []; } };
 const dbOne = (sql,...a) => { if(!db) return null; try{ return db.prepare(sql).get(...a); }catch{ return null; } };
@@ -241,18 +242,19 @@ function verifyDiscordSig(sig, ts, rawBody){
 
 // ---------- EIN Abruf (KEIN Cache-Busting -> stabiler, korrekter Status) ----------
 async function probe(){
-  let status=0, html='';
+  let status=0, html='', t0=Date.now();
   try{
     const r = await fetch(PRODUCT_URL,{ headers:{ 'user-agent':UA, 'accept-language':'de-DE,de;q=0.9' }});
     status = r.status; html = await r.text();
   }catch(e){ html=''; }
+  const ms = Date.now()-t0;
   const sane    = html.includes(SKU);
   const blocked = html.includes(BLOCKED_MARKER);
   const soldOut = html.includes(SOLD_OUT_MARKER);
   const inStock = html.includes(IN_STOCK_MARKER) && html.includes(A2C_MARKER);
   const pageOk  = status===200 && sane && !blocked;
   const available = pageOk && inStock && !soldOut;
-  return { status, sane, blocked, soldOut, inStock, pageOk, available };
+  return { status, sane, blocked, soldOut, inStock, pageOk, available, ms };
 }
 
 // ---------- Pruefung mit Schnell-Bestaetigung ----------
@@ -276,6 +278,8 @@ async function check(){
 
     dbInc('total_checks'); dbSet('last_check_at', last.time); dailyBump('checks');
     dbSet('last_status', !p.pageOk ? 'error' : (available ? 'available' : 'sold_out'));
+    dbAdd('sum_latency_ms', p.ms||0); dbInc('latency_count');   // fuer Durchschnitts-Latenz
+    if(p.pageOk){ if(available) dbInc('available_checks'); else dbInc('sold_out_checks'); }
 
     if(!p.pageOk){
       // transienter Fehler/Block -> Zustand NICHT aendern (kein Fehlalarm, kein Reset)
@@ -355,9 +359,13 @@ if(SELF_URL) setInterval(()=>fetch(SELF_URL.replace(/\/$/,'')+'/walkietalkie').c
 pollUpdates().catch(()=>{});
 
 // ---------- HTTP ----------
+let DASHBOARD=''; try{ DASHBOARD = fs.readFileSync('./public/index.html','utf8'); }catch(e){ console.log('[ui] index.html fehlt:', e.message); }
 const server = http.createServer(async (req,res)=>{
   const url = new URL(req.url, 'http://x');
   const json = (code,obj)=>{ res.writeHead(code,{'content-type':'application/json'}); res.end(JSON.stringify(obj,null,1)); };
+  if(url.pathname === '/' || url.pathname === '/dashboard'){
+    res.writeHead(200,{'content-type':'text/html; charset=utf-8'}); return res.end(DASHBOARD || '<h1>Dashboard nicht geladen</h1>');
+  }
   // ---------- Discord Slash-Commands ----------
   if(url.pathname === '/interactions' && req.method === 'POST'){
     const sig = req.headers['x-signature-ed25519'];
@@ -396,12 +404,17 @@ const server = http.createServer(async (req,res)=>{
   if(url.pathname === '/walkietalkie') return json(200, { awake:true, t:new Date().toISOString() }); // Stay-Awake-Ping (cron-job.org)
   if(url.pathname === '/check')     return json(200, await check().catch(e=>({error:e.message})));
   if(url.pathname === '/stats'){
+    const tc=+(dbGet('total_checks')||0), ac=+(dbGet('available_checks')||0);
+    const lc=+(dbGet('latency_count')||0), ls=+(dbGet('sum_latency_ms')||0);
     return json(200, {
       counters: {
-        total_checks: +(dbGet('total_checks')||0), error_checks: +(dbGet('error_checks')||0),
-        available_events: +(dbGet('available_events')||0),
+        total_checks: tc, available_checks: ac, sold_out_checks: +(dbGet('sold_out_checks')||0),
+        error_checks: +(dbGet('error_checks')||0), available_events: +(dbGet('available_events')||0),
+        availability_rate: tc ? +(100*ac/tc).toFixed(2) : 0,        // % der Checks "verfuegbar"
+        avg_latency_ms: lc ? Math.round(ls/lc) : 0,
         last_available_at: dbGet('last_available_at'), last_check_at: dbGet('last_check_at'),
         last_status: dbGet('last_status'), started_at: dbGet('started_at'),
+        currently_available: wasAvailable,
       },
       summary: dbOne('SELECT COUNT(*) windows, AVG(duration_sec) avg_sec, MIN(duration_sec) min_sec, MAX(duration_sec) max_sec, SUM(duration_sec) total_sec FROM availability_windows WHERE duration_sec IS NOT NULL'),
       byHour:    dbAll('SELECT hour, COUNT(*) windows, ROUND(AVG(duration_sec)) avg_sec FROM availability_windows GROUP BY hour ORDER BY hour'),
