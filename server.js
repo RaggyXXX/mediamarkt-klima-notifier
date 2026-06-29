@@ -19,6 +19,8 @@ const env = process.env;
 const PORT            = env.PORT || 10000;
 const BOT_TOKEN       = env.BOT_TOKEN || '';
 const CHAT_IDS        = (env.CHAT_IDS || env.CHAT_ID || '').split(',').map(s=>s.trim()).filter(Boolean);
+const DISCORD_WEBHOOK = env.DISCORD_WEBHOOK_URL || '';            // Discord-Kanal-Webhook
+const DISCORD_MENTION = (env.DISCORD_MENTION || '').trim();       // z.B. "everyone" oder "here" (optional Ping)
 const PRODUCT_URL     = env.PRODUCT_URL ||
   'https://www.mediamarkt.de/de/product/_ok-oac-7022-w-klimagerat-weiss-max-raumgrosse-67-m-2763143.html';
 const SKU             = env.SKU || '2763143';
@@ -66,6 +68,20 @@ async function broadcastGone(){
   for(const id of subscribers) await tgSend(id, `🔴 Wieder ausverkauft. Du wirst beim nächsten Mal automatisch erneut benachrichtigt.`);
 }
 
+// ---------- Discord (Kanal-Webhook, 1 Nachricht pro Zustandswechsel) ----------
+async function discordSend(text){
+  if(!DISCORD_WEBHOOK) return;
+  const body = { content: text, allowed_mentions: { parse: [] } };
+  if(DISCORD_MENTION === 'everyone' || DISCORD_MENTION === 'here'){
+    body.content = `@${DISCORD_MENTION} ` + text;
+    body.allowed_mentions = { parse: [DISCORD_MENTION] };
+  }
+  try{
+    const r = await fetch(DISCORD_WEBHOOK,{ method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(body) });
+    if(!r.ok) console.log('[discord] HTTP', r.status, await r.text());
+  }catch(e){ console.log('[discord]', e.message); }
+}
+
 // ---------- EIN Abruf (KEIN Cache-Busting -> stabiler, korrekter Status) ----------
 async function probe(){
   let status=0, html='';
@@ -108,13 +124,15 @@ async function check(){
     } else {
       errStreak = 0;
       if(available){
+        const becameAvailable = !wasAvailable;     // echter Zustandswechsel?
         wasAvailable = true; goneStreak = 0;
-        await broadcastAvailable();        // alle noch nicht informierten User
+        await broadcastAvailable();                 // Telegram: alle noch nicht informierten User
+        if(becameAvailable) await discordSend(`🟢 **VERFÜGBAR!** Jetzt kaufbar:\n${PRODUCT_URL}\n⚡ Schnell – meist in <1 Min weg!`);
       } else {
         // Hysterese: erst nach GONE_CONFIRM Checks "weg" in Folge re-armen
         goneStreak++;
         if(goneStreak >= GONE_CONFIRM){
-          if(wasAvailable){ await broadcastGone(); }
+          if(wasAvailable){ await broadcastGone(); await discordSend('🔴 Wieder ausverkauft.'); }
           wasAvailable = false;
           notified.clear();                // re-arm: naechstes Mal wieder alle
         }
@@ -165,6 +183,7 @@ const server = http.createServer(async (req,res)=>{
   }
   // Health / Keepalive-Ziel
   return json(200,{ ok:true, product:PRODUCT_URL, pollSec:CHECK_INTERVAL_SEC,
-                    subscribers:subscribers.size, telegram:!!BOT_TOKEN, selfWakeup:!!SELF_URL, last });
+                    subscribers:subscribers.size, telegram:!!BOT_TOKEN, discord:!!DISCORD_WEBHOOK,
+                    selfWakeup:!!SELF_URL, last });
 });
-server.listen(PORT, ()=>console.log(`Notifier auf :${PORT} | poll ${CHECK_INTERVAL_SEC}s | confirm ${CONFIRM_PROBES}x${CONFIRM_GAP_MS}ms | subs ${subscribers.size} | selfWakeup ${!!SELF_URL}`));
+server.listen(PORT, ()=>console.log(`Notifier auf :${PORT} | poll ${CHECK_INTERVAL_SEC}s | confirm ${CONFIRM_PROBES}x${CONFIRM_GAP_MS}ms | telegram ${!!BOT_TOKEN} | discord ${!!DISCORD_WEBHOOK} | selfWakeup ${!!SELF_URL}`));

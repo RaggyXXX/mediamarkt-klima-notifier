@@ -13,7 +13,11 @@ services:
       - key: BOT_TOKEN
         sync: false                # geheim, selbst eintragen
       - key: CHAT_IDS
-        sync: false                # eine oder mehrere IDs, kommagetrennt: 123,456
+        sync: false                # Telegram: eine/mehrere IDs, kommagetrennt: 123,456
+      - key: DISCORD_WEBHOOK_URL
+        sync: false                # Discord-Kanal-Webhook (optional, parallel zu Telegram)
+      - key: DISCORD_MENTION
+        value: ""                  # leer | "everyone" | "here"  -> optionaler Ping
       - key: PRODUCT_URL
         value: https://www.mediamarkt.de/de/product/_ok-oac-7022-w-klimagerat-weiss-max-raumgrosse-67-m-2763143.html
       - key: SKU

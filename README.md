@@ -16,6 +16,18 @@ wieder lieferbar ist. Dependency-frei (nur Node-Builtins), läuft auf **Render F
   - danach wieder verfügbar → wieder alle.
 - **Dynamisches Abo**: Wer dem Bot schreibt, wird automatisch aufgenommen.
 
+## Kanäle: Telegram und/oder Discord
+Beide laufen parallel — du kannst nur einen oder beide aktivieren.
+- **Telegram**: per User (edge-getriggert, Auto-Abo). Siehe Schritt 1.
+- **Discord**: per **Webhook** in einen Kanal (jeder im Kanal sieht's). Eine Nachricht pro Zustandswechsel.
+
+### Discord-Webhook einrichten
+1. In Discord: **Servereinstellungen → Integrationen → Webhooks → Neuer Webhook** → Kanal wählen → **Webhook-URL kopieren**.
+2. Als Env-Variable `DISCORD_WEBHOOK_URL` eintragen.
+3. Optional `DISCORD_MENTION=everyone` (oder `here`) für einen Ping.
+
+(Hinweis: Das ist ein Webhook, kein Gateway-Bot mit Slash-Commands — für reine Benachrichtigungen ideal und Render-Free-tauglich.)
+
 ## 1) Telegram-Bot
 1. `@BotFather` → `/newbot` → **BOT_TOKEN** notieren.
 2. Dem Bot **„hi" schreiben** (sonst darf er dir nichts senden).
@@ -37,8 +49,10 @@ damit funktioniert der Self-Wakeup automatisch.
 ### Wichtige Env-Variablen
 | Variable | Standard | Bedeutung |
 |---|---|---|
-| `BOT_TOKEN` | – | Telegram-Bot-Token |
-| `CHAT_IDS` | – | Empfänger, kommagetrennt (optional, da Auto-Abo) |
+| `BOT_TOKEN` | – | Telegram-Bot-Token (optional, wenn nur Discord) |
+| `CHAT_IDS` | – | Telegram-Empfänger, kommagetrennt (optional, da Auto-Abo) |
+| `DISCORD_WEBHOOK_URL` | – | Discord-Kanal-Webhook (optional) |
+| `DISCORD_MENTION` | – | leer / `everyone` / `here` (optionaler Ping) |
 | `CHECK_INTERVAL_SEC` | `7` | Poll-Takt. Für hochfrequent ggf. `5` |
 | `CONFIRM_PROBES` | `3` | Bestätigungen gegen Fehlalarm |
 | `CONFIRM_GAP_MS` | `1200` | Abstand der Bestätigungen |
