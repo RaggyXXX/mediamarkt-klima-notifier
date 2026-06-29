@@ -63,6 +63,22 @@ const UPDATES_SEC        = Math.max(5,  parseInt(env.UPDATES_SEC       || '20', 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 const sleep = ms => new Promise(r=>setTimeout(r,ms));
 
+// ---------- SQLite (Node-eingebaut, sammelt Statistik) ----------
+// Hinweis: Render-Free-Disk ist ephemer -> Daten resetten bei Redeploy.
+let db = null;
+const dbSet = (k,v) => { if(db) try{ db.prepare('INSERT INTO stats(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(k,String(v)); }catch{} };
+const dbGet = (k)   => { if(!db) return null; try{ const r=db.prepare('SELECT value FROM stats WHERE key=?').get(k); return r?r.value:null; }catch{ return null; } };
+const dbInc = (k)   => { const v=(parseInt(dbGet(k)||'0',10)||0)+1; dbSet(k,v); return v; };
+const dbEvent = (type,info='') => { if(db) try{ db.prepare('INSERT INTO events(ts,type,info) VALUES(?,?,?)').run(new Date().toISOString(),type,info); }catch{} };
+try{
+  const { DatabaseSync } = await import('node:sqlite');
+  db = new DatabaseSync('./data.db');
+  db.exec('CREATE TABLE IF NOT EXISTS stats(key TEXT PRIMARY KEY, value TEXT);'
+        + 'CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, type TEXT, info TEXT);');
+  if(!dbGet('started_at')) dbSet('started_at', new Date().toISOString());
+  console.log('[db] SQLite aktiv (./data.db)');
+}catch(e){ console.log('[db] SQLite nicht verfügbar:', e.message); }
+
 const subscribers = new Set(CHAT_IDS);   // Empfaenger (Env + dynamisch)
 const notified    = new Set();           // wer im AKTUELLEN Fenster schon benachrichtigt wurde
 let wasAvailable = false;
@@ -154,6 +170,23 @@ async function notifyDiscord(){
   }
 }
 
+function fmtTime(iso){ return iso ? iso.slice(0,16).replace('T',' ')+' UTC' : '–'; }
+function statusText(){
+  const cur = wasAvailable ? '🟢 **VERFÜGBAR**' : (last && last.pageOk ? '🔴 ausverkauft' : '⚠️ unklar');
+  const dmN = dmSubs.size, chN = [...channelSubs.values()].reduce((a,s)=>a+s.size,0), tgN = subscribers.size;
+  return [
+    '🌡️ **Klima-Notifier — Status**',
+    'Produkt: OK OAC 7022 W (2763143)',
+    `Aktuell: ${cur}`,
+    `Letzter Check: ${fmtTime(last && last.time)}`,
+    `Checks gesamt: ${dbGet('total_checks')||0} (Fehler: ${dbGet('error_checks')||0})`,
+    `Verfügbar-Events: ${dbGet('available_events')||0} · zuletzt: ${fmtTime(dbGet('last_available_at'))}`,
+    `Abos: DM ${dmN} · Kanal ${chN} · Telegram ${tgN}`,
+    `Läuft seit: ${fmtTime(dbGet('started_at'))} · Poll alle ${IDLE_SEC}s`,
+    PRODUCT_URL,
+  ].join('\n');
+}
+
 // Discord-Interaktions-Signatur (Ed25519) pruefen
 function verifyDiscordSig(sig, ts, rawBody){
   if(!DISCORD_PUBLIC_KEY || !sig || !ts) return false;
@@ -199,16 +232,19 @@ async function check(){
              available, subs:subscribers.size, notified:notified.size };
     console.log(`[${last.time.slice(11,19)}] avail=${available} (probe=${p.available} ${confirms}/${CONFIRM_PROBES}) soldOut=${p.soldOut} http=${p.status} -> mode=${available?'ACTIVE':'idle'}`);
 
+    dbInc('total_checks'); dbSet('last_check_at', last.time);
+    dbSet('last_status', !p.pageOk ? 'error' : (available ? 'available' : 'sold_out'));
+
     if(!p.pageOk){
       // transienter Fehler/Block -> Zustand NICHT aendern (kein Fehlalarm, kein Reset)
-      errStreak++;
+      errStreak++; dbInc('error_checks');
       if(errStreak===5) for(const id of subscribers)
         await tgSend(id, `⚠️ Notifier-Problem (HTTP ${p.status}, sane=${p.sane}, blocked=${p.blocked}). Evtl. IP geblockt → Intervall erhöhen.`);
     } else {
       errStreak = 0;
       if(available){
         const becameAvailable = !wasAvailable;     // echter Zustandswechsel?
-        if(becameAvailable) availLine = pickFunny();  // pro Fenster EIN Spruch
+        if(becameAvailable){ availLine = pickFunny(); dbInc('available_events'); dbSet('last_available_at', last.time); dbEvent('available'); }
         wasAvailable = true; goneStreak = 0;
         await broadcastAvailable();                 // Telegram: alle noch nicht informierten User
         await notifyDiscord();                      // Discord: DM- + Kanal-Abos (jeder 1x pro Fenster)
@@ -216,7 +252,7 @@ async function check(){
         // Hysterese: erst nach GONE_CONFIRM Checks "weg" in Folge re-armen
         goneStreak++;
         if(goneStreak >= GONE_CONFIRM){
-          if(wasAvailable){ await broadcastGone(); }
+          if(wasAvailable){ await broadcastGone(); dbEvent('gone'); }
           wasAvailable = false;
           notified.clear(); notifiedDiscord.clear();   // re-arm: naechstes Mal wieder alle (Telegram + Discord)
         }
@@ -276,6 +312,9 @@ const server = http.createServer(async (req,res)=>{
       const name = body.data && body.data.name;
       const userId = (body.member && body.member.user && body.member.user.id) || (body.user && body.user.id);
       const channelId = body.channel_id || (body.channel && body.channel.id);
+      if(name === 'status'){
+        return json(200, { type:4, data:{ content: statusText() } });   // sichtbar fuer alle (kein flags:64)
+      }
       let content;
       if(name === 'notify-me-dm'){
         if(userId){ dmSubs.add(userId); saveSubs(); }
