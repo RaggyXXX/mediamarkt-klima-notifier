@@ -70,14 +70,44 @@ const dbSet = (k,v) => { if(db) try{ db.prepare('INSERT INTO stats(key,value) VA
 const dbGet = (k)   => { if(!db) return null; try{ const r=db.prepare('SELECT value FROM stats WHERE key=?').get(k); return r?r.value:null; }catch{ return null; } };
 const dbInc = (k)   => { const v=(parseInt(dbGet(k)||'0',10)||0)+1; dbSet(k,v); return v; };
 const dbEvent = (type,info='') => { if(db) try{ db.prepare('INSERT INTO events(ts,type,info) VALUES(?,?,?)').run(new Date().toISOString(),type,info); }catch{} };
+const dbAll = (sql,...a) => { if(!db) return []; try{ return db.prepare(sql).all(...a); }catch{ return []; } };
+const dbOne = (sql,...a) => { if(!db) return null; try{ return db.prepare(sql).get(...a); }catch{ return null; } };
+// Berliner Zeit (was den User interessiert: "wie viel Uhr")
+const berlinHour = (d) => +new Intl.DateTimeFormat('de-DE',{timeZone:'Europe/Berlin',hour:'2-digit',hour12:false}).formatToParts(d).find(x=>x.type==='hour').value;
+const berlinWeekday = (d) => new Intl.DateTimeFormat('de-DE',{timeZone:'Europe/Berlin',weekday:'short'}).format(d);
+const berlinStr = (d) => new Intl.DateTimeFormat('de-DE',{timeZone:'Europe/Berlin',dateStyle:'medium',timeStyle:'short'}).format(d);
 try{
   const { DatabaseSync } = await import('node:sqlite');
   db = new DatabaseSync('./data.db');
-  db.exec('CREATE TABLE IF NOT EXISTS stats(key TEXT PRIMARY KEY, value TEXT);'
-        + 'CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, type TEXT, info TEXT);');
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS stats(key TEXT PRIMARY KEY, value TEXT);
+    CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, type TEXT, info TEXT);
+    CREATE TABLE IF NOT EXISTS availability_windows(
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      available_at TEXT,        -- ISO/UTC: wann verfuegbar geworden
+      available_local TEXT,     -- Berlin lesbar
+      weekday TEXT,             -- Berlin (Mo., Di., ...)
+      hour INTEGER,             -- Berlin 0-23
+      gone_at TEXT,             -- wann wieder weg
+      duration_sec INTEGER,     -- wie lange verfuegbar = "wie schnell ausverkauft"
+      checks_during INTEGER,    -- Checks waehrend des Fensters
+      dm_subs INTEGER, channel_subs INTEGER, tg_subs INTEGER  -- Abo-Stand zum Zeitpunkt
+    );
+    CREATE TABLE IF NOT EXISTS daily(
+      day TEXT PRIMARY KEY,     -- YYYY-MM-DD (Berlin)
+      windows INTEGER DEFAULT 0,
+      checks INTEGER DEFAULT 0,
+      errors INTEGER DEFAULT 0,
+      avail_seconds INTEGER DEFAULT 0
+    );
+  `);
   if(!dbGet('started_at')) dbSet('started_at', new Date().toISOString());
   console.log('[db] SQLite aktiv (./data.db)');
 }catch(e){ console.log('[db] SQLite nicht verfügbar:', e.message); }
+const channelSubCount = () => [...channelSubs.values()].reduce((a,s)=>a+s.size,0);
+const berlinDay = (d) => new Intl.DateTimeFormat('en-CA',{timeZone:'Europe/Berlin',year:'numeric',month:'2-digit',day:'2-digit'}).format(d);
+const dailyBump = (col, n=1) => { if(db) try{ db.prepare(`INSERT INTO daily(day,${col}) VALUES(?,?) ON CONFLICT(day) DO UPDATE SET ${col}=${col}+excluded.${col}`).run(berlinDay(new Date()), n); }catch{} };
+let currentWindowId = null, availableSince = 0, windowChecks = 0;
 
 const subscribers = new Set(CHAT_IDS);   // Empfaenger (Env + dynamisch)
 const notified    = new Set();           // wer im AKTUELLEN Fenster schon benachrichtigt wurde
@@ -171,20 +201,32 @@ async function notifyDiscord(){
 }
 
 function fmtTime(iso){ return iso ? iso.slice(0,16).replace('T',' ')+' UTC' : '–'; }
+const fmtDur = s => s==null?'–':(s>=60?`${Math.floor(s/60)}m ${s%60}s`:`${s}s`);
 function statusText(){
   const cur = wasAvailable ? '🟢 **VERFÜGBAR**' : (last && last.pageOk ? '🔴 ausverkauft' : '⚠️ unklar');
-  const dmN = dmSubs.size, chN = [...channelSubs.values()].reduce((a,s)=>a+s.size,0), tgN = subscribers.size;
-  return [
+  const dmN = dmSubs.size, chN = channelSubCount(), tgN = subscribers.size;
+  const w = dbOne('SELECT COUNT(*) n, AVG(duration_sec) a, MIN(duration_sec) mn, MAX(duration_sec) mx FROM availability_windows WHERE duration_sec IS NOT NULL') || {};
+  const topHour = dbOne('SELECT hour, COUNT(*) c FROM availability_windows GROUP BY hour ORDER BY c DESC LIMIT 1');
+  const lastW = dbOne('SELECT available_local, duration_sec, gone_at FROM availability_windows ORDER BY id DESC LIMIT 1');
+  const lines = [
     '🌡️ **Klima-Notifier — Status**',
     'Produkt: OK OAC 7022 W (2763143)',
     `Aktuell: ${cur}`,
     `Letzter Check: ${fmtTime(last && last.time)}`,
     `Checks gesamt: ${dbGet('total_checks')||0} (Fehler: ${dbGet('error_checks')||0})`,
-    `Verfügbar-Events: ${dbGet('available_events')||0} · zuletzt: ${fmtTime(dbGet('last_available_at'))}`,
+    `Verfügbarkeits-Fenster bisher: ${w.n||0}`,
+  ];
+  if(w.n){
+    lines.push(`⏱️ Verfügbar-Dauer: ø ${fmtDur(Math.round(w.a))} · kürzeste ${fmtDur(w.mn)} · längste ${fmtDur(w.mx)}`);
+    if(topHour) lines.push(`🕐 Häufigste Uhrzeit: ${String(topHour.hour).padStart(2,'0')}:00 Uhr (${topHour.c}× · Berlin)`);
+    if(lastW) lines.push(`📦 Letztes Fenster: ${lastW.available_local} · war ${fmtDur(lastW.duration_sec)} verfügbar`);
+  }
+  lines.push(
     `Abos: DM ${dmN} · Kanal ${chN} · Telegram ${tgN}`,
     `Läuft seit: ${fmtTime(dbGet('started_at'))} · Poll alle ${IDLE_SEC}s`,
     PRODUCT_URL,
-  ].join('\n');
+  );
+  return lines.join('\n');
 }
 
 // Discord-Interaktions-Signatur (Ed25519) pruefen
@@ -232,19 +274,29 @@ async function check(){
              available, subs:subscribers.size, notified:notified.size };
     console.log(`[${last.time.slice(11,19)}] avail=${available} (probe=${p.available} ${confirms}/${CONFIRM_PROBES}) soldOut=${p.soldOut} http=${p.status} -> mode=${available?'ACTIVE':'idle'}`);
 
-    dbInc('total_checks'); dbSet('last_check_at', last.time);
+    dbInc('total_checks'); dbSet('last_check_at', last.time); dailyBump('checks');
     dbSet('last_status', !p.pageOk ? 'error' : (available ? 'available' : 'sold_out'));
 
     if(!p.pageOk){
       // transienter Fehler/Block -> Zustand NICHT aendern (kein Fehlalarm, kein Reset)
-      errStreak++; dbInc('error_checks');
-      if(errStreak===5) for(const id of subscribers)
-        await tgSend(id, `⚠️ Notifier-Problem (HTTP ${p.status}, sane=${p.sane}, blocked=${p.blocked}). Evtl. IP geblockt → Intervall erhöhen.`);
+      errStreak++; dbInc('error_checks'); dailyBump('errors');
+      if(errStreak===5){ dbEvent('error', `HTTP ${p.status} sane=${p.sane} blocked=${p.blocked}`);
+        for(const id of subscribers)
+          await tgSend(id, `⚠️ Notifier-Problem (HTTP ${p.status}, sane=${p.sane}, blocked=${p.blocked}). Evtl. IP geblockt → Intervall erhöhen.`); }
     } else {
       errStreak = 0;
       if(available){
         const becameAvailable = !wasAvailable;     // echter Zustandswechsel?
-        if(becameAvailable){ availLine = pickFunny(); dbInc('available_events'); dbSet('last_available_at', last.time); dbEvent('available'); }
+        if(becameAvailable){
+          availLine = pickFunny();
+          const now = new Date();
+          availableSince = now.getTime(); windowChecks = 0;
+          dbInc('available_events'); dbSet('last_available_at', last.time); dbEvent('available', `${berlinStr(now)}`); dailyBump('windows');
+          if(db){ try{ const r = db.prepare('INSERT INTO availability_windows(available_at,available_local,weekday,hour,dm_subs,channel_subs,tg_subs,checks_during) VALUES(?,?,?,?,?,?,?,0)')
+                          .run(now.toISOString(), berlinStr(now), berlinWeekday(now), berlinHour(now), dmSubs.size, channelSubCount(), subscribers.size);
+                       currentWindowId = r.lastInsertRowid; }catch(e){ console.log('[win]', e.message); } }
+        }
+        windowChecks++;
         wasAvailable = true; goneStreak = 0;
         await broadcastAvailable();                 // Telegram: alle noch nicht informierten User
         await notifyDiscord();                      // Discord: DM- + Kanal-Abos (jeder 1x pro Fenster)
@@ -252,7 +304,13 @@ async function check(){
         // Hysterese: erst nach GONE_CONFIRM Checks "weg" in Folge re-armen
         goneStreak++;
         if(goneStreak >= GONE_CONFIRM){
-          if(wasAvailable){ await broadcastGone(); dbEvent('gone'); }
+          if(wasAvailable){
+            const dur = Math.round((Date.now()-availableSince)/1000);
+            await broadcastGone(); dbEvent('gone', `${dur}s verfuegbar`);
+            if(db && currentWindowId){ try{ db.prepare('UPDATE availability_windows SET gone_at=?, duration_sec=?, checks_during=? WHERE id=?')
+                                              .run(new Date().toISOString(), dur, windowChecks, currentWindowId); }catch{} dailyBump('avail_seconds', dur); }
+            currentWindowId = null;
+          }
           wasAvailable = false;
           notified.clear(); notifiedDiscord.clear();   // re-arm: naechstes Mal wieder alle (Telegram + Discord)
         }
@@ -337,6 +395,22 @@ const server = http.createServer(async (req,res)=>{
   }
   if(url.pathname === '/walkietalkie') return json(200, { awake:true, t:new Date().toISOString() }); // Stay-Awake-Ping (cron-job.org)
   if(url.pathname === '/check')     return json(200, await check().catch(e=>({error:e.message})));
+  if(url.pathname === '/stats'){
+    return json(200, {
+      counters: {
+        total_checks: +(dbGet('total_checks')||0), error_checks: +(dbGet('error_checks')||0),
+        available_events: +(dbGet('available_events')||0),
+        last_available_at: dbGet('last_available_at'), last_check_at: dbGet('last_check_at'),
+        last_status: dbGet('last_status'), started_at: dbGet('started_at'),
+      },
+      summary: dbOne('SELECT COUNT(*) windows, AVG(duration_sec) avg_sec, MIN(duration_sec) min_sec, MAX(duration_sec) max_sec, SUM(duration_sec) total_sec FROM availability_windows WHERE duration_sec IS NOT NULL'),
+      byHour:    dbAll('SELECT hour, COUNT(*) windows, ROUND(AVG(duration_sec)) avg_sec FROM availability_windows GROUP BY hour ORDER BY hour'),
+      byWeekday: dbAll('SELECT weekday, COUNT(*) windows, ROUND(AVG(duration_sec)) avg_sec FROM availability_windows GROUP BY weekday'),
+      daily:     dbAll('SELECT * FROM daily ORDER BY day DESC LIMIT 30'),
+      windows:   dbAll('SELECT * FROM availability_windows ORDER BY id DESC LIMIT 50'),
+      recentEvents: dbAll('SELECT * FROM events ORDER BY id DESC LIMIT 40'),
+    });
+  }
   if(url.pathname === '/getchatid'){
     if(!BOT_TOKEN) return json(400,{error:'BOT_TOKEN fehlt'});
     try{
