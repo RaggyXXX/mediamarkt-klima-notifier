@@ -1,68 +1,61 @@
 # MediaMarkt → Telegram Verfügbarkeits-Notifier (Render Free)
 
-Meldet dir per **Telegram**, sobald die Klimaanlage (OK OAC 7022 W, `2763143`) wieder **wirklich** lieferbar ist.
-Dependency-frei (nur Node-Builtins), läuft auf **Render Free**.
+Meldet **mehreren** Empfängern per **Telegram**, sobald die Klimaanlage (OK OAC 7022 W, `2763143`)
+wieder lieferbar ist. Dependency-frei (nur Node-Builtins), läuft auf **Render Free**.
 
-## Wie die Verfügbarkeit erkannt wird (zuverlässig)
-- Einfacher HTML-Abruf der Produktseite, **ohne** Cache-Busting → liefert den stabilen,
-  korrekten Status (live getestet: 10/10 = identisch zu dem, was du im Browser siehst).
-- **Positiver** Marker: lieferbar nur, wenn `mms-cofr-delivery_AVAILABLE` **und** der
-  Warenkorb-Button `cofr-add-to-basket-button` da sind — und der Ausverkauft-Marker weg ist.
-- **Bestätigung**: erst nach `CONFIRM_PROBES` Abrufen in Folge „verfügbar" wird gemeldet.
-- **Cooldown**: max. eine „verfügbar"-Meldung pro `NOTIFY_COOLDOWN_MIN` (Anti-Spam bei Geflacker).
-- **Sanity/Block-Schutz**: keine Meldung bei HTTP-Fehler/Akamai-Sperre/kaputter Seite.
+## Architektur (schnell + selbstwachhaltend)
+- **Schneller interner Poller** (`CHECK_INTERVAL_SEC`, Standard 7 s) – der eigentliche Treiber.
+- **Self-Wakeup**: pingt alle `KEEPALIVE_MIN` die eigene Render-URL (`RENDER_EXTERNAL_URL`),
+  damit der Free-Dienst nicht nach 15 Min einschläft. **Kein externer Cron nötig** (nur optional als Notnetz).
+- **Erkennung ohne Cache-Busting** → stabiler, korrekter Status (live getestet = identisch zum Browser).
+  Positiver Marker: `mms-cofr-delivery_AVAILABLE` **und** Warenkorb-Button `cofr-add-to-basket-button`.
+- **Schnell-Bestätigung**: `CONFIRM_PROBES` Abrufe in Folge (je `CONFIRM_GAP_MS` Abstand) gegen CDN-Ausreißer.
+- **Edge-getriggert pro User, kein Zeit-Cooldown**:
+  - verfügbar → **alle** Empfänger, die es noch nicht haben, werden benachrichtigt (jeder 1× pro Fenster).
+  - **Hysterese**: „wieder ausverkauft" zählt erst nach `GONE_CONFIRM` Checks in Folge → kein Spam bei Geflacker.
+  - danach wieder verfügbar → wieder alle.
+- **Dynamisches Abo**: Wer dem Bot schreibt, wird automatisch aufgenommen.
 
-> Hinweis: MediaMarkt liefert für diesen hochfrequenten Artikel gelegentlich abweichende
-> Seiten-Varianten. Genau dagegen sind „positiver Marker + Bestätigung + Cooldown" gebaut.
+## 1) Telegram-Bot
+1. `@BotFather` → `/newbot` → **BOT_TOKEN** notieren.
+2. Dem Bot **„hi" schreiben** (sonst darf er dir nichts senden).
+3. **Chat-ID**: via `@userinfobot` oder nach Deploy `…/getchatid`.
+   Mehrere Empfänger: alle schreiben dem Bot (Auto-Abo) **oder** IDs kommagetrennt in `CHAT_IDS`.
 
-## 1) Telegram-Bot anlegen
-1. In Telegram **@BotFather** → `/newbot` → Name vergeben → du bekommst den **BOT_TOKEN**.
-2. Deinem neuen Bot **eine Nachricht schreiben** (irgendwas, z. B. „hi").
-3. **CHAT_ID** holen: entweder über **@userinfobot** (schreibt dir deine ID),
-   oder nach dem Deploy `https://DEIN-SERVICE.onrender.com/getchatid` aufrufen.
+## 2) Auf GitHub pushen
+```bash
+cd render-notifier
+git remote add origin https://github.com/DEINNAME/klima-notifier.git
+git push -u origin master
+```
 
-## 2) Auf Render deployen
-**Variante A – Blueprint (einfach):**
-1. Code in ein **GitHub-Repo** pushen (siehe unten).
-2. Render → **New + → Blueprint** → Repo auswählen → erkennt `render.yaml`.
-3. Unter **Environment** eintragen: `BOT_TOKEN`, `CHAT_ID`. Deploy.
+## 3) Render deployen
+**New + → Blueprint** → Repo wählen (erkennt `render.yaml`) → unter **Environment**
+`BOT_TOKEN` + `CHAT_IDS` eintragen → Deploy. Fertig – `RENDER_EXTERNAL_URL` setzt Render selbst,
+damit funktioniert der Self-Wakeup automatisch.
 
-**Variante B – manuell:**
-1. Render → **New + → Web Service** → Repo verbinden.
-2. Runtime **Node**, Build `npm install`, Start `node server.js`, Plan **Free**.
-3. Environment-Variablen setzen (siehe unten). Deploy.
+### Wichtige Env-Variablen
+| Variable | Standard | Bedeutung |
+|---|---|---|
+| `BOT_TOKEN` | – | Telegram-Bot-Token |
+| `CHAT_IDS` | – | Empfänger, kommagetrennt (optional, da Auto-Abo) |
+| `CHECK_INTERVAL_SEC` | `7` | Poll-Takt. Für hochfrequent ggf. `5` |
+| `CONFIRM_PROBES` | `3` | Bestätigungen gegen Fehlalarm |
+| `CONFIRM_GAP_MS` | `1200` | Abstand der Bestätigungen |
+| `GONE_CONFIRM` | `3` | „weg"-Checks in Folge bis Re-Trigger (Anti-Flacker) |
+| `KEEPALIVE_MIN` | `10` | Self-Wakeup-Takt |
 
-### Environment-Variablen
-| Variable | Wert |
-|---|---|
-| `BOT_TOKEN` | dein Telegram-Bot-Token |
-| `CHAT_ID` | deine Telegram-Chat-ID |
-| `PRODUCT_URL` | (vorbelegt: die Klimaanlage) |
-| `SKU` | `2763143` |
-| `CHECK_INTERVAL_MIN` | `10` (interner Timer, solange wach) |
-| `CONFIRM_PROBES` | `3` |
-| `NOTIFY_COOLDOWN_MIN` | `30` |
-
-## 3) WICHTIG: Externer Cron gegen Render-Spindown
-Render-Free-Dienste **schlafen nach 15 Min Inaktivität ein** → der interne Timer stoppt.
-Lösung (kostenlos): bei **https://cron-job.org** einen Job anlegen, der alle paar Minuten
-`https://DEIN-SERVICE.onrender.com/check` aufruft. Das **weckt** den Dienst **und** löst die Prüfung aus.
-- Empfehlung: alle **2–3 Minuten** (cron-job.org erlaubt bis zu jede Minute).
-- Bei hochfrequentem Artikel ruhig enger takten.
+## 4) (Optional) Externer Cron als Notnetz
+Self-Wakeup reicht normalerweise. Falls der Dienst doch mal komplett einschläft
+(z. B. nach Deploy/Crash) und sich nicht selbst wecken kann, leg bei **cron-job.org**
+einen Ping auf `…/` alle ~12 Min an. Reiner Sicherheitsgurt.
 
 ## Endpoints
-- `GET /` – Status/Health (kein Check)
-- `GET /check` – führt eine Prüfung aus (vom Cron aufrufen)
-- `GET /getchatid` – zeigt Chat-IDs aus den letzten Bot-Nachrichten
+`GET /` Health/Keepalive · `GET /check` manuelle Prüfung · `GET /getchatid` Chat-IDs anzeigen
 
-## Lokal testen
-```
-BOT_TOKEN=... CHAT_ID=... node server.js
-# dann http://localhost:10000/check aufrufen
-```
-
-## Grenzen (ehrlich)
-- Render Free + externer Cron = Auflösung von ~1–3 Min. Ganz kurze Verfügbarkeits-Fenster
-  eines hochfrequenten Artikels können dazwischenrutschen.
-- Dieser Bot **benachrichtigt nur** — kaufen musst du selbst (schnell sein).
-  Für vollautomatischen Kauf siehe das übergeordnete Projekt (`../README.md`).
+## Ehrliche Grenzen
+- Der Artikel **flackert real** (mal lieferbar, mal nicht, im Sekundentakt). Der Bot meldet bei einem
+  bestätigten Fenster – kaufen musst du dann **sofort selbst** (geht oft in <1 Min wieder weg).
+- Aggressives Polling (z. B. 5 s) erhöht das Risiko einer IP-Sperre durch MediaMarkt/Akamai.
+  Der Block-Schutz verhindert Fehlalarme und warnt dich; dann Intervall erhöhen.
+- Für echten Auto-Kauf siehe übergeordnetes Projekt (`../README.md`).

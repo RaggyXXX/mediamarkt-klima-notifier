@@ -1,5 +1,5 @@
 # Render Blueprint – im Dashboard "New +" -> "Blueprint" -> dieses Repo waehlen.
-# Danach BOT_TOKEN und CHAT_ID unter Environment eintragen.
+# Danach BOT_TOKEN und CHAT_IDS unter Environment eintragen.
 services:
   - type: web
     name: mediamarkt-klima-notifier
@@ -11,12 +11,20 @@ services:
     healthCheckPath: /
     envVars:
       - key: BOT_TOKEN
-        sync: false          # selbst im Dashboard eintragen (geheim)
-      - key: CHAT_ID
-        sync: false          # selbst im Dashboard eintragen
+        sync: false                # geheim, selbst eintragen
+      - key: CHAT_IDS
+        sync: false                # eine oder mehrere IDs, kommagetrennt: 123,456
       - key: PRODUCT_URL
         value: https://www.mediamarkt.de/de/product/_ok-oac-7022-w-klimagerat-weiss-max-raumgrosse-67-m-2763143.html
       - key: SKU
         value: "2763143"
-      - key: CHECK_INTERVAL_MIN
-        value: "10"
+      - key: CHECK_INTERVAL_SEC
+        value: "7"                 # Haupt-Poll-Takt (Sekunden)
+      - key: CONFIRM_PROBES
+        value: "3"                 # Bestaetigungen in Folge gegen CDN-Ausreisser
+      - key: CONFIRM_GAP_MS
+        value: "1200"
+      - key: GONE_CONFIRM
+        value: "3"                 # so oft "weg" in Folge -> erst dann Re-Trigger (Anti-Flacker)
+      - key: KEEPALIVE_MIN
+        value: "10"                # Self-Wakeup-Takt (nutzt RENDER_EXTERNAL_URL automatisch)
