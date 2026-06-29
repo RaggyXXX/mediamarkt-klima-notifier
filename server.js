@@ -96,12 +96,29 @@ async function broadcastGone(){
   for(const id of subscribers) await tgSend(id, `🔴 Wieder ausverkauft. Du wirst beim nächsten Mal automatisch erneut benachrichtigt.`);
 }
 
-// ---------- Discord: per-User-Abo (/notifyme) + DM bei Verfuegbarkeit ----------
+// ---------- Discord-Abos: /notify-me-dm (DM) + /notify-me-here (Kanal) ----------
 const SUBS_FILE = './discord_subs.json';
-const discordSubs = new Set(loadSubs());          // Discord-User-IDs
-const notifiedDiscord = new Set();                // wer im aktuellen Fenster schon eine DM hat
-function loadSubs(){ try{ return JSON.parse(fs.readFileSync(SUBS_FILE,'utf8')); }catch{ return []; } }
-function saveSubs(){ try{ fs.writeFileSync(SUBS_FILE, JSON.stringify([...discordSubs])); }catch(e){ console.log('[subs] save', e.message); } }
+const dmSubs = new Set();                       // User-IDs (DM-Modus)
+const channelSubs = new Map();                  // channelId -> Set(userId)  (Kanal-Modus)
+const notifiedDiscord = new Set();              // userId, der im aktuellen Fenster schon Bescheid hat
+loadSubs();
+function loadSubs(){
+  try{
+    const d = JSON.parse(fs.readFileSync(SUBS_FILE,'utf8'));
+    (d.dm||[]).forEach(u=>dmSubs.add(u));
+    for(const [ch,us] of Object.entries(d.channels||{})) channelSubs.set(ch, new Set(us));
+  }catch{}
+}
+function saveSubs(){
+  try{
+    const channels={}; for(const [ch,us] of channelSubs) channels[ch]=[...us];
+    fs.writeFileSync(SUBS_FILE, JSON.stringify({ dm:[...dmSubs], channels }));
+  }catch(e){ console.log('[subs] save', e.message); }
+}
+function unsubscribeEverywhere(uid){
+  dmSubs.delete(uid);
+  for(const [ch,us] of channelSubs){ us.delete(uid); if(!us.size) channelSubs.delete(ch); }
+}
 
 const dHeaders = () => ({ authorization:`Bot ${DISCORD_BOT_TOKEN}`, 'content-type':'application/json' });
 async function discordDM(userId, text){
@@ -115,12 +132,25 @@ async function discordDM(userId, text){
     return true;
   }catch(e){ console.log('[dm]', e.message); return false; }
 }
-async function dmDiscordSubs(){
-  for(const uid of discordSubs){
-    if(!notifiedDiscord.has(uid)){
-      const ok = await discordDM(uid, availText());
-      if(ok) notifiedDiscord.add(uid);
-    }
+async function channelPost(channelId, userIds, text){
+  if(!DISCORD_BOT_TOKEN || !userIds.length) return false;
+  const content = userIds.map(u=>`<@${u}>`).join(' ') + '\n' + text;
+  try{
+    const r = await fetch(`https://discord.com/api/v10/channels/${channelId}/messages`,{ method:'POST', headers:dHeaders(),
+      body:JSON.stringify({ content, allowed_mentions:{ users:userIds } }) });
+    if(!r.ok){ console.log('[chan] HTTP', r.status, await r.text()); return false; }
+    return true;
+  }catch(e){ console.log('[chan]', e.message); return false; }
+}
+async function notifyDiscord(){
+  // DM-Abonnenten
+  for(const uid of dmSubs){
+    if(!notifiedDiscord.has(uid)){ if(await discordDM(uid, availText())) notifiedDiscord.add(uid); }
+  }
+  // Kanal-Abonnenten: pro Kanal eine Nachricht mit Mentions
+  for(const [ch, us] of channelSubs){
+    const fresh = [...us].filter(u=>!notifiedDiscord.has(u));
+    if(fresh.length && await channelPost(ch, fresh, availText())) fresh.forEach(u=>notifiedDiscord.add(u));
   }
 }
 
@@ -181,7 +211,7 @@ async function check(){
         if(becameAvailable) availLine = pickFunny();  // pro Fenster EIN Spruch
         wasAvailable = true; goneStreak = 0;
         await broadcastAvailable();                 // Telegram: alle noch nicht informierten User
-        await dmDiscordSubs();                      // Discord: alle Abonnenten (jeder 1x pro Fenster)
+        await notifyDiscord();                      // Discord: DM- + Kanal-Abos (jeder 1x pro Fenster)
       } else {
         // Hysterese: erst nach GONE_CONFIRM Checks "weg" in Folge re-armen
         goneStreak++;
@@ -245,13 +275,20 @@ const server = http.createServer(async (req,res)=>{
     if(body.type === 2){                                              // Slash-Command
       const name = body.data && body.data.name;
       const userId = (body.member && body.member.user && body.member.user.id) || (body.user && body.user.id);
+      const channelId = body.channel_id || (body.channel && body.channel.id);
       let content;
-      if(name === 'notifyme'){
-        if(userId){ discordSubs.add(userId); saveSubs(); }
-        content = '✅ Eingetragen! Sobald die Klimaanlage lieferbar ist, kriegst du von mir eine DM. 🌬️🤠';
+      if(name === 'notify-me-dm'){
+        if(userId){ dmSubs.add(userId); saveSubs(); }
+        content = '✅ Eingetragen! Sobald die Klimaanlage lieferbar ist, kriegst du eine **DM**. 🌬️🤠';
+      } else if(name === 'notify-me-here'){
+        if(userId && channelId){
+          if(!channelSubs.has(channelId)) channelSubs.set(channelId, new Set());
+          channelSubs.get(channelId).add(userId); saveSubs();
+        }
+        content = '✅ Eingetragen! Bei Verfügbarkeit **pinge ich dich hier im Kanal**. 📣🤠';
       } else if(name === 'unnotifyme'){
-        if(userId){ discordSubs.delete(userId); notifiedDiscord.delete(userId); saveSubs(); }
-        content = '🔕 Abgemeldet. Keine Klima-Meldungen mehr für dich.';
+        if(userId){ unsubscribeEverywhere(userId); notifiedDiscord.delete(userId); saveSubs(); }
+        content = '🔕 Abgemeldet (DM **und** Kanal). Keine Klima-Meldungen mehr für dich.';
       } else {
         content = 'Unbekannter Befehl.';
       }
@@ -273,7 +310,8 @@ const server = http.createServer(async (req,res)=>{
   // Health / Keepalive-Ziel
   return json(200,{ ok:true, product:PRODUCT_URL, idleSec:IDLE_SEC, activeSec:ACTIVE_SEC,
                     verify:`${CONFIRM_PROBES}x${CONFIRM_GAP_MS}ms`, currentlyAvailable:wasAvailable,
-                    telegramSubs:subscribers.size, discordSubs:discordSubs.size,
+                    telegramSubs:subscribers.size,
+                    discordDmSubs:dmSubs.size, discordChannelSubs:[...channelSubs.values()].reduce((a,s)=>a+s.size,0),
                     telegram:!!BOT_TOKEN, discord:DISCORD_ON, slash:!!DISCORD_PUBLIC_KEY,
                     selfWakeup:!!SELF_URL, last });
 });
