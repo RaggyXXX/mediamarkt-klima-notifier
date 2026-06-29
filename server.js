@@ -28,9 +28,11 @@ const SOLD_OUT_MARKER = env.SOLD_OUT_MARKER || 'mms-cofr-delivery_NOT_AVAILABLE'
 const IN_STOCK_MARKER = env.IN_STOCK_MARKER || 'mms-cofr-delivery_AVAILABLE';
 const A2C_MARKER      = env.A2C_MARKER      || 'cofr-add-to-basket-button';
 const BLOCKED_MARKER  = env.BLOCKED_MARKER  || 'Reference&#32;ID';
-const CHECK_INTERVAL_SEC = Math.max(2,  parseInt(env.CHECK_INTERVAL_SEC || '7', 10));   // Haupt-Poll-Takt
-const CONFIRM_PROBES     = Math.max(1,  parseInt(env.CONFIRM_PROBES     || '3', 10));   // gegen CDN-Ausreisser
-const CONFIRM_GAP_MS     = Math.max(300,parseInt(env.CONFIRM_GAP_MS     || '1200',10)); // Abstand der Bestaetigungen
+// Adaptives Polling: langsam wenn ausverkauft, schnell sobald "verfuegbar" gewittert wird.
+const IDLE_SEC           = Math.max(2,  parseInt(env.IDLE_SEC || env.CHECK_INTERVAL_SEC || '4', 10)); // Takt wenn NICHT verfuegbar (~3-5s)
+const ACTIVE_SEC         = Math.max(1,  parseInt(env.ACTIVE_SEC         || '2', 10));   // Takt SOLANGE verfuegbar (engmaschig)
+const CONFIRM_PROBES     = Math.max(1,  parseInt(env.CONFIRM_PROBES     || '3', 10));   // Schnell-Verify gegen CDN-Ausreisser
+const CONFIRM_GAP_MS     = Math.max(200,parseInt(env.CONFIRM_GAP_MS     || '600',10));  // kurzer Abstand im Verify-Modus
 const GONE_CONFIRM       = Math.max(1,  parseInt(env.GONE_CONFIRM       || '3', 10));   // so viele Checks "weg" in Folge -> erst dann re-armed (Anti-Flacker-Spam)
 const KEEPALIVE_MIN      = Math.max(1,  parseInt(env.KEEPALIVE_MIN      || '10', 10));  // Self-Ping-Takt
 const SELF_URL           = env.RENDER_EXTERNAL_URL || env.SELF_URL || '';               // Render setzt das automatisch
@@ -115,6 +117,7 @@ async function check(){
     const available = confirms >= CONFIRM_PROBES;
     last = { time:new Date().toISOString(), ...p, confirms, confirmNeeded:CONFIRM_PROBES,
              available, subs:subscribers.size, notified:notified.size };
+    console.log(`[${last.time.slice(11,19)}] avail=${available} (probe=${p.available} ${confirms}/${CONFIRM_PROBES}) soldOut=${p.soldOut} http=${p.status} -> mode=${available?'ACTIVE':'idle'}`);
 
     if(!p.pageOk){
       // transienter Fehler/Block -> Zustand NICHT aendern (kein Fehlalarm, kein Reset)
@@ -161,11 +164,20 @@ async function pollUpdates(){
   }catch(e){ console.log('[updates]', e.message); }
 }
 
-// ---------- Timer ----------
-setInterval(()=>check().catch(e=>console.log('check err',e.message)), CHECK_INTERVAL_SEC*1000);
+// ---------- Adaptiver Poll-Loop ----------
+// Naechster Takt haengt am Zustand: verfuegbar -> ACTIVE_SEC (engmaschig),
+// sonst IDLE_SEC. Die Schnell-Verifikation passiert in check() selbst
+// (CONFIRM_PROBES im CONFIRM_GAP_MS-Takt).
+async function loop(){
+  try{ await check(); }catch(e){ console.log('check err', e.message); }
+  const next = (wasAvailable ? ACTIVE_SEC : IDLE_SEC) * 1000;
+  setTimeout(loop, next);
+}
+loop();
+
 setInterval(()=>pollUpdates().catch(()=>{}), UPDATES_SEC*1000);
 if(SELF_URL) setInterval(()=>fetch(SELF_URL.replace(/\/$/,'')+'/').catch(()=>{}), KEEPALIVE_MIN*60*1000);
-check().catch(()=>{}); pollUpdates().catch(()=>{});
+pollUpdates().catch(()=>{});
 
 // ---------- HTTP ----------
 const server = http.createServer(async (req,res)=>{
@@ -182,8 +194,9 @@ const server = http.createServer(async (req,res)=>{
     }catch(e){ return json(500,{error:e.message}); }
   }
   // Health / Keepalive-Ziel
-  return json(200,{ ok:true, product:PRODUCT_URL, pollSec:CHECK_INTERVAL_SEC,
+  return json(200,{ ok:true, product:PRODUCT_URL, idleSec:IDLE_SEC, activeSec:ACTIVE_SEC,
+                    verify:`${CONFIRM_PROBES}x${CONFIRM_GAP_MS}ms`, currentlyAvailable:wasAvailable,
                     subscribers:subscribers.size, telegram:!!BOT_TOKEN, discord:!!DISCORD_WEBHOOK,
                     selfWakeup:!!SELF_URL, last });
 });
-server.listen(PORT, ()=>console.log(`Notifier auf :${PORT} | poll ${CHECK_INTERVAL_SEC}s | confirm ${CONFIRM_PROBES}x${CONFIRM_GAP_MS}ms | telegram ${!!BOT_TOKEN} | discord ${!!DISCORD_WEBHOOK} | selfWakeup ${!!SELF_URL}`));
+server.listen(PORT, ()=>console.log(`Notifier auf :${PORT} | idle ${IDLE_SEC}s / active ${ACTIVE_SEC}s | verify ${CONFIRM_PROBES}x${CONFIRM_GAP_MS}ms | telegram ${!!BOT_TOKEN} | discord ${!!DISCORD_WEBHOOK} | selfWakeup ${!!SELF_URL}`));

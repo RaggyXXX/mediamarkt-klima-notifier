@@ -22,12 +22,14 @@ services:
         value: https://www.mediamarkt.de/de/product/_ok-oac-7022-w-klimagerat-weiss-max-raumgrosse-67-m-2763143.html
       - key: SKU
         value: "2763143"
-      - key: CHECK_INTERVAL_SEC
-        value: "7"                 # Haupt-Poll-Takt (Sekunden)
+      - key: IDLE_SEC
+        value: "4"                 # Poll-Takt wenn NICHT verfuegbar (~3-5s)
+      - key: ACTIVE_SEC
+        value: "2"                 # Poll-Takt SOLANGE verfuegbar (engmaschig)
       - key: CONFIRM_PROBES
-        value: "3"                 # Bestaetigungen in Folge gegen CDN-Ausreisser
+        value: "3"                 # Schnell-Verify gegen CDN-Ausreisser
       - key: CONFIRM_GAP_MS
-        value: "1200"
+        value: "600"               # kurzer Abstand im Verify-Modus
       - key: GONE_CONFIRM
         value: "3"                 # so oft "weg" in Folge -> erst dann Re-Trigger (Anti-Flacker)
       - key: KEEPALIVE_MIN

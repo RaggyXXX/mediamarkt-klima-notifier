@@ -3,8 +3,9 @@
 Meldet **mehreren** Empfängern per **Telegram**, sobald die Klimaanlage (OK OAC 7022 W, `2763143`)
 wieder lieferbar ist. Dependency-frei (nur Node-Builtins), läuft auf **Render Free**.
 
-## Architektur (schnell + selbstwachhaltend)
-- **Schneller interner Poller** (`CHECK_INTERVAL_SEC`, Standard 7 s) – der eigentliche Treiber.
+## Architektur (adaptiv + selbstwachhaltend)
+- **Adaptiver Poller**: im Leerlauf alle `IDLE_SEC` (≈4 s); sobald ein Abruf „verfügbar" wittert,
+  sofort **Schnell-Verify** (`CONFIRM_PROBES`×`CONFIRM_GAP_MS`) und danach engmaschig alle `ACTIVE_SEC`.
 - **Self-Wakeup**: pingt alle `KEEPALIVE_MIN` die eigene Render-URL (`RENDER_EXTERNAL_URL`),
   damit der Free-Dienst nicht nach 15 Min einschläft. **Kein externer Cron nötig** (nur optional als Notnetz).
 - **Erkennung ohne Cache-Busting** → stabiler, korrekter Status (live getestet = identisch zum Browser).
@@ -53,9 +54,10 @@ damit funktioniert der Self-Wakeup automatisch.
 | `CHAT_IDS` | – | Telegram-Empfänger, kommagetrennt (optional, da Auto-Abo) |
 | `DISCORD_WEBHOOK_URL` | – | Discord-Kanal-Webhook (optional) |
 | `DISCORD_MENTION` | – | leer / `everyone` / `here` (optionaler Ping) |
-| `CHECK_INTERVAL_SEC` | `7` | Poll-Takt. Für hochfrequent ggf. `5` |
-| `CONFIRM_PROBES` | `3` | Bestätigungen gegen Fehlalarm |
-| `CONFIRM_GAP_MS` | `1200` | Abstand der Bestätigungen |
+| `IDLE_SEC` | `4` | Poll-Takt wenn **nicht** verfügbar (~3–5 s) |
+| `ACTIVE_SEC` | `2` | Poll-Takt **solange** verfügbar (engmaschig) |
+| `CONFIRM_PROBES` | `3` | Schnell-Verify-Abrufe gegen Fehlalarm |
+| `CONFIRM_GAP_MS` | `600` | Abstand im Verify-Modus |
 | `GONE_CONFIRM` | `3` | „weg"-Checks in Folge bis Re-Trigger (Anti-Flacker) |
 | `KEEPALIVE_MIN` | `10` | Self-Wakeup-Takt |
 
