@@ -15,7 +15,11 @@ services:
       - key: CHAT_IDS
         sync: false                # Telegram: eine/mehrere IDs, kommagetrennt: 123,456
       - key: DISCORD_WEBHOOK_URL
-        sync: false                # Discord-Kanal-Webhook (optional, parallel zu Telegram)
+        sync: false                # Discord-Webhook (Variante 1, optional)
+      - key: DISCORD_BOT_TOKEN
+        sync: false                # Discord-Bot-Token (Variante 2, REST)
+      - key: DISCORD_CHANNEL_ID
+        sync: false                # Ziel-Kanal-ID fuer Bot-Variante
       - key: DISCORD_MENTION
         value: ""                  # leer | "everyone" | "here"  -> optionaler Ping
       - key: PRODUCT_URL

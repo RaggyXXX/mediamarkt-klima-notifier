@@ -19,8 +19,11 @@ const env = process.env;
 const PORT            = env.PORT || 10000;
 const BOT_TOKEN       = env.BOT_TOKEN || '';
 const CHAT_IDS        = (env.CHAT_IDS || env.CHAT_ID || '').split(',').map(s=>s.trim()).filter(Boolean);
-const DISCORD_WEBHOOK = env.DISCORD_WEBHOOK_URL || '';            // Discord-Kanal-Webhook
+const DISCORD_WEBHOOK = env.DISCORD_WEBHOOK_URL || '';            // Discord-Kanal-Webhook (Variante 1)
+const DISCORD_BOT_TOKEN  = env.DISCORD_BOT_TOKEN || '';           // Bot-Token (Variante 2, REST)
+const DISCORD_CHANNEL_ID = env.DISCORD_CHANNEL_ID || '';          // Ziel-Kanal-ID fuer Bot-Variante
 const DISCORD_MENTION = (env.DISCORD_MENTION || '').trim();       // z.B. "everyone" oder "here" (optional Ping)
+const DISCORD_ON = !!DISCORD_WEBHOOK || !!(DISCORD_BOT_TOKEN && DISCORD_CHANNEL_ID);
 const PRODUCT_URL     = env.PRODUCT_URL ||
   'https://www.mediamarkt.de/de/product/_ok-oac-7022-w-klimagerat-weiss-max-raumgrosse-67-m-2763143.html';
 const SKU             = env.SKU || '2763143';
@@ -72,14 +75,23 @@ async function broadcastGone(){
 
 // ---------- Discord (Kanal-Webhook, 1 Nachricht pro Zustandswechsel) ----------
 async function discordSend(text){
-  if(!DISCORD_WEBHOOK) return;
+  if(!DISCORD_ON) return;
   const body = { content: text, allowed_mentions: { parse: [] } };
   if(DISCORD_MENTION === 'everyone' || DISCORD_MENTION === 'here'){
     body.content = `@${DISCORD_MENTION} ` + text;
     body.allowed_mentions = { parse: [DISCORD_MENTION] };
   }
   try{
-    const r = await fetch(DISCORD_WEBHOOK,{ method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(body) });
+    let r;
+    if(DISCORD_WEBHOOK){                                  // Variante 1: Webhook
+      r = await fetch(DISCORD_WEBHOOK,{ method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(body) });
+    } else {                                              // Variante 2: Bot-REST
+      r = await fetch(`https://discord.com/api/v10/channels/${DISCORD_CHANNEL_ID}/messages`,{
+        method:'POST',
+        headers:{ 'content-type':'application/json', authorization:`Bot ${DISCORD_BOT_TOKEN}` },
+        body: JSON.stringify(body)
+      });
+    }
     if(!r.ok) console.log('[discord] HTTP', r.status, await r.text());
   }catch(e){ console.log('[discord]', e.message); }
 }
@@ -197,7 +209,7 @@ const server = http.createServer(async (req,res)=>{
   // Health / Keepalive-Ziel
   return json(200,{ ok:true, product:PRODUCT_URL, idleSec:IDLE_SEC, activeSec:ACTIVE_SEC,
                     verify:`${CONFIRM_PROBES}x${CONFIRM_GAP_MS}ms`, currentlyAvailable:wasAvailable,
-                    subscribers:subscribers.size, telegram:!!BOT_TOKEN, discord:!!DISCORD_WEBHOOK,
+                    subscribers:subscribers.size, telegram:!!BOT_TOKEN, discord:DISCORD_ON,
                     selfWakeup:!!SELF_URL, last });
 });
-server.listen(PORT, ()=>console.log(`Notifier auf :${PORT} | idle ${IDLE_SEC}s / active ${ACTIVE_SEC}s | verify ${CONFIRM_PROBES}x${CONFIRM_GAP_MS}ms | telegram ${!!BOT_TOKEN} | discord ${!!DISCORD_WEBHOOK} | selfWakeup ${!!SELF_URL}`));
+server.listen(PORT, ()=>console.log(`Notifier auf :${PORT} | idle ${IDLE_SEC}s / active ${ACTIVE_SEC}s | verify ${CONFIRM_PROBES}x${CONFIRM_GAP_MS}ms | telegram ${!!BOT_TOKEN} | discord ${DISCORD_ON} | selfWakeup ${!!SELF_URL}`));
