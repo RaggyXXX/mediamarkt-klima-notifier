@@ -1,0 +1,11 @@
+{
+  "name": "mediamarkt-klima-notifier",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Telegram-Benachrichtigung, wenn die MediaMarkt-Klimaanlage wieder lieferbar ist. Dependency-frei, laeuft auf Render Free.",
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "start": "node server.js"
+  }
+}

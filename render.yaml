@@ -1,0 +1,22 @@
+# Render Blueprint – im Dashboard "New +" -> "Blueprint" -> dieses Repo waehlen.
+# Danach BOT_TOKEN und CHAT_ID unter Environment eintragen.
+services:
+  - type: web
+    name: mediamarkt-klima-notifier
+    runtime: node
+    plan: free
+    region: frankfurt
+    buildCommand: npm install
+    startCommand: node server.js
+    healthCheckPath: /
+    envVars:
+      - key: BOT_TOKEN
+        sync: false          # selbst im Dashboard eintragen (geheim)
+      - key: CHAT_ID
+        sync: false          # selbst im Dashboard eintragen
+      - key: PRODUCT_URL
+        value: https://www.mediamarkt.de/de/product/_ok-oac-7022-w-klimagerat-weiss-max-raumgrosse-67-m-2763143.html
+      - key: SKU
+        value: "2763143"
+      - key: CHECK_INTERVAL_MIN
+        value: "10"
