@@ -28,6 +28,10 @@ services:
         value: "1521468616590102578" # Rolle "🌬️ Klima-Abo" -> /notify-me-here
       - key: DISCORD_NOTIFY_CHANNEL_ID
         value: "464901478977503232"  # #bot-spam -> hier wird @Klima-Abo gepingt
+      - key: TURSO_URL
+        value: "libsql://schnorkle-ivofehn.aws-eu-west-1.turso.io"  # dauerhafte Stats (cloud-SQLite)
+      - key: TURSO_TOKEN
+        sync: false                 # geheimer Turso-Auth-Token (selbst eintragen)
       - key: DISCORD_MENTION
         value: ""                  # leer | "everyone" | "here"  -> optionaler Ping
       - key: DISCORD_PUBLIC_KEY

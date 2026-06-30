@@ -114,6 +114,56 @@ const berlinDay = (d) => new Intl.DateTimeFormat('en-CA',{timeZone:'Europe/Berli
 const dailyBump = (col, n=1) => { if(db) try{ db.prepare(`INSERT INTO daily(day,${col}) VALUES(?,?) ON CONFLICT(day) DO UPDATE SET ${col}=${col}+excluded.${col}`).run(berlinDay(new Date()), n); }catch{} };
 let currentWindowId = null, availableSince = 0, windowChecks = 0;
 
+// ---------- Turso (cloud-SQLite, DAUERHAFT) — lokale SQLite ist nur Live-Cache ----------
+// Beim Start aus Turso wiederherstellen; alle 2 Min + bei Events + bei SIGTERM flushen.
+const TURSO_HTTP  = (env.TURSO_URL || '').replace(/^libsql:\/\//,'https://').replace(/\/$/,'');
+const TURSO_TOKEN = env.TURSO_TOKEN || '';
+const tursoOn = !!(TURSO_HTTP && TURSO_TOKEN);
+const tArg  = v => (v===null||v===undefined) ? {type:'null'} : (typeof v==='number' ? (Number.isInteger(v)?{type:'integer',value:String(v)}:{type:'float',value:v}) : {type:'text',value:String(v)});
+const tCell = c => (!c||c.type==='null') ? null : (c.type==='integer'?Number(c.value):c.value);
+async function tPipeline(stmts){
+  if(!tursoOn) return [];
+  const body = { requests: [...stmts.map(s=>({type:'execute',stmt:{sql:s.sql,args:(s.args||[]).map(tArg)}})), {type:'close'}] };
+  const r = await fetch(TURSO_HTTP+'/v2/pipeline',{ method:'POST', headers:{ authorization:'Bearer '+TURSO_TOKEN, 'content-type':'application/json' }, body:JSON.stringify(body) });
+  if(!r.ok){ console.log('[turso]', r.status, (await r.text()).slice(0,150)); return []; }
+  const d = await r.json();
+  return (d.results||[]).map(res=>{
+    if(res.type!=='ok' || !res.response || res.response.type!=='execute') return null;
+    const R=res.response.result, cols=(R.cols||[]).map(c=>c.name);
+    return (R.rows||[]).map(row=>Object.fromEntries(row.map((cell,i)=>[cols[i],tCell(cell)])));
+  });
+}
+const tExec = async (sql,args) => (await tPipeline([{sql,args}]))[0] || [];
+
+async function tursoInit(){
+  if(!tursoOn){ console.log('[turso] aus (TURSO_URL/TURSO_TOKEN fehlt)'); return; }
+  await tPipeline([
+    {sql:'CREATE TABLE IF NOT EXISTS stats(key TEXT PRIMARY KEY, value TEXT)'},
+    {sql:'CREATE TABLE IF NOT EXISTS availability_windows(id INTEGER PRIMARY KEY, available_at TEXT, available_local TEXT, weekday TEXT, hour INTEGER, gone_at TEXT, duration_sec INTEGER, checks_during INTEGER, dm_subs INTEGER, channel_subs INTEGER, tg_subs INTEGER)'},
+    {sql:'CREATE TABLE IF NOT EXISTS daily(day TEXT PRIMARY KEY, windows INTEGER, checks INTEGER, errors INTEGER, avail_seconds INTEGER)'},
+  ]);
+  if(!db) return;
+  try{
+    for(const r of await tExec('SELECT key,value FROM stats')) dbSet(r.key, r.value);
+    const wins = await tExec('SELECT * FROM availability_windows');
+    for(const w of wins) db.prepare('INSERT OR REPLACE INTO availability_windows(id,available_at,available_local,weekday,hour,gone_at,duration_sec,checks_during,dm_subs,channel_subs,tg_subs) VALUES(?,?,?,?,?,?,?,?,?,?,?)').run(w.id,w.available_at,w.available_local,w.weekday,w.hour,w.gone_at,w.duration_sec,w.checks_during,w.dm_subs,w.channel_subs,w.tg_subs);
+    for(const r of await tExec('SELECT * FROM daily')) db.prepare('INSERT OR REPLACE INTO daily(day,windows,checks,errors,avail_seconds) VALUES(?,?,?,?,?)').run(r.day,r.windows,r.checks,r.errors,r.avail_seconds);
+    console.log(`[turso] wiederhergestellt: ${wins.length} Fenster`);
+  }catch(e){ console.log('[turso] restore', e.message); }
+}
+let flushing=false;
+async function flushToTurso(){
+  if(!tursoOn || !db || flushing) return; flushing=true;
+  try{
+    const stmts=[];
+    for(const r of dbAll('SELECT key,value FROM stats')) stmts.push({sql:'INSERT INTO stats(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',args:[r.key,r.value]});
+    for(const w of dbAll('SELECT * FROM availability_windows')) stmts.push({sql:'INSERT OR REPLACE INTO availability_windows(id,available_at,available_local,weekday,hour,gone_at,duration_sec,checks_during,dm_subs,channel_subs,tg_subs) VALUES(?,?,?,?,?,?,?,?,?,?,?)',args:[w.id,w.available_at,w.available_local,w.weekday,w.hour,w.gone_at,w.duration_sec,w.checks_during,w.dm_subs,w.channel_subs,w.tg_subs]});
+    for(const r of dbAll('SELECT * FROM daily')) stmts.push({sql:'INSERT OR REPLACE INTO daily(day,windows,checks,errors,avail_seconds) VALUES(?,?,?,?,?)',args:[r.day,r.windows,r.checks,r.errors,r.avail_seconds]});
+    if(stmts.length) await tPipeline(stmts);
+  }catch(e){ console.log('[turso] flush', e.message); }
+  finally{ flushing=false; }
+}
+
 const subscribers = new Set(CHAT_IDS);   // Empfaenger (Env + dynamisch)
 const notified    = new Set();           // wer im AKTUELLEN Fenster schon benachrichtigt wurde
 let wasAvailable = false;
@@ -334,6 +384,7 @@ async function check(){
           if(db){ try{ const r = db.prepare('INSERT INTO availability_windows(available_at,available_local,weekday,hour,dm_subs,channel_subs,tg_subs,checks_during) VALUES(?,?,?,?,?,?,?,0)')
                           .run(now.toISOString(), berlinStr(now), berlinWeekday(now), berlinHour(now), dmSubs.size, channelSubCount(), subscribers.size);
                        currentWindowId = r.lastInsertRowid; }catch(e){ console.log('[win]', e.message); } }
+          flushToTurso().catch(()=>{});   // neues Fenster sofort sichern
         }
         windowChecks++;
         wasAvailable = true; goneStreak = 0;
@@ -358,6 +409,7 @@ async function check(){
             if(db && currentWindowId){ try{ db.prepare('UPDATE availability_windows SET gone_at=?, duration_sec=?, checks_during=? WHERE id=?')
                                               .run(new Date().toISOString(), dur, windowChecks, currentWindowId); }catch{} dailyBump('avail_seconds', dur); }
             currentWindowId = null;
+            flushToTurso().catch(()=>{});   // geschlossenes Fenster + Dauer sofort sichern
           }
           wasAvailable = false;
         }
@@ -401,6 +453,9 @@ setInterval(()=>pollUpdates().catch(()=>{}), UPDATES_SEC*1000);
 if(SELF_URL) setInterval(()=>fetch(SELF_URL.replace(/\/$/,'')+'/walkietalkie').catch(()=>{}), KEEPALIVE_MIN*60*1000);
 pollUpdates().catch(()=>{});
 loadSubsRemote().catch(()=>{});   // persistente Abo-Liste aus Discord laden
+tursoInit().catch(e=>console.log('[turso] init', e.message));   // dauerhafte Stats aus Turso wiederherstellen
+setInterval(()=>flushToTurso().catch(()=>{}), 2*60*1000);       // alle 2 Min nach Turso sichern
+for(const sig of ['SIGTERM','SIGINT']) process.on(sig, async()=>{ await flushToTurso().catch(()=>{}); process.exit(0); });  // beim Recycle sichern
 
 // ---------- HTTP ----------
 let DASHBOARD=''; try{ DASHBOARD = fs.readFileSync('./public/index.html','utf8'); }catch(e){ console.log('[ui] index.html fehlt:', e.message); }
@@ -490,6 +545,6 @@ const server = http.createServer(async (req,res)=>{
                     telegramSubs:subscribers.size,
                     discordDmSubs:dmSubs.size, discordChannelSubs:[...channelSubs.values()].reduce((a,s)=>a+s.size,0),
                     telegram:!!BOT_TOKEN, discord:DISCORD_ON, slash:!!DISCORD_PUBLIC_KEY,
-                    selfWakeup:!!SELF_URL, last });
+                    selfWakeup:!!SELF_URL, turso:tursoOn, last });
 });
 server.listen(PORT, ()=>console.log(`Notifier auf :${PORT} | idle ${IDLE_SEC}s / active ${ACTIVE_SEC}s | verify ${CONFIRM_PROBES}x${CONFIRM_GAP_MS}ms | telegram ${!!BOT_TOKEN} | discord ${DISCORD_ON} | selfWakeup ${!!SELF_URL}`));
