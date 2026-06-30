@@ -144,30 +144,58 @@ async function broadcastGone(){
 }
 
 // ---------- Discord-Abos: /notify-me-dm (DM) + /notify-me-here (Kanal) ----------
+// PERSISTENT: Abos werden in einer Discord-Nachricht gespeichert (ueberlebt
+// Redeploy/Recycle, da nicht auf der ephemeren Render-Platte). Datei nur als
+// lokaler Schnell-Cache.
 const SUBS_FILE = './discord_subs.json';
+const SUBS_MARKER = 'KLIMA_SUBS_V1';
+const STORE_CHANNEL = env.DISCORD_STORE_CHANNEL_ID || DISCORD_CHANNEL_ID;   // wo die Abo-Liste liegt
+let storeMsgId = null;
 const dmSubs = new Set();                       // User-IDs (DM-Modus)
 const channelSubs = new Map();                  // channelId -> Set(userId)  (Kanal-Modus)
 const notifiedDiscord = new Set();              // userId, der im aktuellen Fenster schon Bescheid hat
-loadSubs();
-function loadSubs(){
-  try{
-    const d = JSON.parse(fs.readFileSync(SUBS_FILE,'utf8'));
-    (d.dm||[]).forEach(u=>dmSubs.add(u));
-    for(const [ch,us] of Object.entries(d.channels||{})) channelSubs.set(ch, new Set(us));
-  }catch{}
-}
-function saveSubs(){
-  try{
-    const channels={}; for(const [ch,us] of channelSubs) channels[ch]=[...us];
-    fs.writeFileSync(SUBS_FILE, JSON.stringify({ dm:[...dmSubs], channels }));
-  }catch(e){ console.log('[subs] save', e.message); }
-}
+
+const subsPayload = () => { const channels={}; for(const [ch,us] of channelSubs) channels[ch]=[...us]; return { dm:[...dmSubs], channels }; };
+const applyPayload = (p) => {
+  dmSubs.clear(); channelSubs.clear();
+  (p.dm||[]).forEach(u=>dmSubs.add(u));
+  for(const [ch,us] of Object.entries(p.channels||{})) channelSubs.set(ch, new Set(us));
+};
+function loadSubsFile(){ try{ applyPayload(JSON.parse(fs.readFileSync(SUBS_FILE,'utf8'))); }catch{} }
+function saveSubsFile(){ try{ fs.writeFileSync(SUBS_FILE, JSON.stringify(subsPayload())); }catch{} }
+function saveSubs(){ saveSubsFile(); saveSubsRemote().catch(e=>console.log('[subs] remote', e.message)); }  // beides
 function unsubscribeEverywhere(uid){
   dmSubs.delete(uid);
   for(const [ch,us] of channelSubs){ us.delete(uid); if(!us.size) channelSubs.delete(ch); }
 }
+loadSubsFile();   // sofortiger lokaler Cache; Discord-Quelle ueberschreibt beim Start
 
 const dHeaders = () => ({ authorization:`Bot ${DISCORD_BOT_TOKEN}`, 'content-type':'application/json' });
+
+// Abo-Liste in Discord-Nachricht laden/speichern (persistent)
+async function loadSubsRemote(){
+  if(!DISCORD_BOT_TOKEN || !STORE_CHANNEL) return;
+  try{
+    const r = await fetch(`https://discord.com/api/v10/channels/${STORE_CHANNEL}/messages?limit=100`,{ headers:dHeaders() });
+    const msgs = await r.json();
+    if(!Array.isArray(msgs)) { console.log('[subs] load:', JSON.stringify(msgs).slice(0,120)); return; }
+    const m = msgs.find(x=>x.content && x.content.startsWith(SUBS_MARKER));
+    if(m){ storeMsgId = m.id; applyPayload(JSON.parse(m.content.slice(m.content.indexOf('{')))); saveSubsFile();
+           console.log(`[subs] aus Discord geladen: DM ${dmSubs.size}, Kanal ${channelSubCount()}`); }
+    else console.log('[subs] keine gespeicherte Liste gefunden (Start leer)');
+  }catch(e){ console.log('[subs] load', e.message); }
+}
+async function saveSubsRemote(){
+  if(!DISCORD_BOT_TOKEN || !STORE_CHANNEL) return;
+  const content = `${SUBS_MARKER} ${JSON.stringify(subsPayload())}`;
+  if(storeMsgId){
+    const r = await fetch(`https://discord.com/api/v10/channels/${STORE_CHANNEL}/messages/${storeMsgId}`,{ method:'PATCH', headers:dHeaders(), body:JSON.stringify({ content }) });
+    if(r.ok) return;
+    if(r.status===404) storeMsgId=null; else { console.log('[subs] patch', r.status); return; }
+  }
+  const r = await fetch(`https://discord.com/api/v10/channels/${STORE_CHANNEL}/messages`,{ method:'POST', headers:dHeaders(), body:JSON.stringify({ content }) });
+  if(r.ok){ const m=await r.json(); storeMsgId=m.id; } else console.log('[subs] post', r.status, await r.text());
+}
 async function discordDM(userId, text){
   if(!DISCORD_BOT_TOKEN) return false;
   try{
@@ -357,6 +385,7 @@ loop();
 setInterval(()=>pollUpdates().catch(()=>{}), UPDATES_SEC*1000);
 if(SELF_URL) setInterval(()=>fetch(SELF_URL.replace(/\/$/,'')+'/walkietalkie').catch(()=>{}), KEEPALIVE_MIN*60*1000);
 pollUpdates().catch(()=>{});
+loadSubsRemote().catch(()=>{});   // persistente Abo-Liste aus Discord laden
 
 // ---------- HTTP ----------
 let DASHBOARD=''; try{ DASHBOARD = fs.readFileSync('./public/index.html','utf8'); }catch(e){ console.log('[ui] index.html fehlt:', e.message); }

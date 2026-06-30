@@ -19,7 +19,9 @@ services:
       - key: DISCORD_BOT_TOKEN
         sync: false                # Discord-Bot-Token (Variante 2, REST)
       - key: DISCORD_CHANNEL_ID
-        sync: false                # Ziel-Kanal-ID fuer Bot-Variante
+        sync: false                # (Alt) Kanal-ID; dient als Default-Speicherort
+      - key: DISCORD_STORE_CHANNEL_ID
+        value: "540112008310161410"  # ruhiger Kanal (#bot-log) fuer die persistente Abo-Liste
       - key: DISCORD_MENTION
         value: ""                  # leer | "everyone" | "here"  -> optionaler Ping
       - key: DISCORD_PUBLIC_KEY
