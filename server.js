@@ -27,6 +27,9 @@ const DISCORD_BOT_TOKEN  = env.DISCORD_BOT_TOKEN || '';           // Bot-Token (
 const DISCORD_CHANNEL_ID = env.DISCORD_CHANNEL_ID || '';          // Ziel-Kanal-ID fuer Bot-Variante
 const DISCORD_MENTION = (env.DISCORD_MENTION || '').trim();       // z.B. "everyone" oder "here" (optional Ping)
 const DISCORD_PUBLIC_KEY = env.DISCORD_PUBLIC_KEY || '';          // fuer Slash-Command-Signaturpruefung
+const DISCORD_GUILD_ID  = env.DISCORD_GUILD_ID  || '';           // Server-ID (fuer Rollen)
+const DISCORD_ROLE_ID   = env.DISCORD_ROLE_ID   || '';           // Rolle "Klima-Abo" -> /notify-me-here
+const DISCORD_NOTIFY_CHANNEL_ID = env.DISCORD_NOTIFY_CHANNEL_ID || DISCORD_CHANNEL_ID; // wo @Rolle gepingt wird
 const DISCORD_ON = !!DISCORD_BOT_TOKEN;   // per-User-DMs via Bot
 
 // 10 dumme, aber witzige Sprueche fuer die Verfuegbarkeits-Meldung
@@ -217,12 +220,33 @@ async function channelPost(channelId, userIds, text){
     return true;
   }catch(e){ console.log('[chan]', e.message); return false; }
 }
+// ---------- Rolle "Klima-Abo" (sichtbares Abzeichen + @-Ping) ----------
+let rolePinged = false;   // pro Verfuegbarkeits-Fenster nur 1 Rollen-Ping
+async function assignRole(uid){
+  if(!DISCORD_BOT_TOKEN || !DISCORD_GUILD_ID || !DISCORD_ROLE_ID) return false;
+  try{ const r = await fetch(`https://discord.com/api/v10/guilds/${DISCORD_GUILD_ID}/members/${uid}/roles/${DISCORD_ROLE_ID}`,{ method:'PUT', headers:dHeaders() });
+       if(!r.ok) console.log('[role+]', r.status, await r.text()); return r.ok; }catch(e){ console.log('[role+]', e.message); return false; }
+}
+async function removeRole(uid){
+  if(!DISCORD_BOT_TOKEN || !DISCORD_GUILD_ID || !DISCORD_ROLE_ID) return false;
+  try{ const r = await fetch(`https://discord.com/api/v10/guilds/${DISCORD_GUILD_ID}/members/${uid}/roles/${DISCORD_ROLE_ID}`,{ method:'DELETE', headers:dHeaders() }); return r.ok; }catch(e){ console.log('[role-]', e.message); return false; }
+}
+async function pingRole(){
+  if(!DISCORD_BOT_TOKEN || !DISCORD_ROLE_ID || !DISCORD_NOTIFY_CHANNEL_ID) return false;
+  const content = `<@&${DISCORD_ROLE_ID}>\n${availText()}`;
+  try{ const r = await fetch(`https://discord.com/api/v10/channels/${DISCORD_NOTIFY_CHANNEL_ID}/messages`,{ method:'POST', headers:dHeaders(),
+        body:JSON.stringify({ content, allowed_mentions:{ roles:[DISCORD_ROLE_ID] } }) });
+       if(!r.ok) console.log('[rping]', r.status, await r.text()); return r.ok; }catch(e){ console.log('[rping]', e.message); return false; }
+}
+
 async function notifyDiscord(){
   // DM-Abonnenten
   for(const uid of dmSubs){
     if(!notifiedDiscord.has(uid)){ if(await discordDM(uid, availText())) notifiedDiscord.add(uid); }
   }
-  // Kanal-Abonnenten: pro Kanal eine Nachricht mit Mentions
+  // Rolle "Klima-Abo": 1 Ping pro Fenster im Notify-Kanal
+  if(DISCORD_ROLE_ID && !rolePinged){ if(await pingRole()) rolePinged = true; }
+  // (Fallback) Kanal-Abos ohne Rolle: pro Kanal eine Nachricht mit Mentions
   for(const [ch, us] of channelSubs){
     const fresh = [...us].filter(u=>!notifiedDiscord.has(u));
     if(fresh.length && await channelPost(ch, fresh, availText())) fresh.forEach(u=>notifiedDiscord.add(u));
@@ -344,7 +368,7 @@ async function check(){
             currentWindowId = null;
           }
           wasAvailable = false;
-          notified.clear(); notifiedDiscord.clear();   // re-arm: naechstes Mal wieder alle (Telegram + Discord)
+          notified.clear(); notifiedDiscord.clear(); rolePinged = false;   // re-arm: naechstes Mal wieder alle
         }
       }
     }
@@ -415,14 +439,21 @@ const server = http.createServer(async (req,res)=>{
         if(userId){ dmSubs.add(userId); saveSubs(); }
         content = '✅ Eingetragen! Sobald die Klimaanlage lieferbar ist, kriegst du eine **DM**. 🌬️🤠';
       } else if(name === 'notify-me-here'){
-        if(userId && channelId){
-          if(!channelSubs.has(channelId)) channelSubs.set(channelId, new Set());
-          channelSubs.get(channelId).add(userId); saveSubs();
+        if(DISCORD_ROLE_ID){                                   // Rollen-Modus
+          const ok = userId ? await assignRole(userId) : false;
+          content = ok
+            ? '✅ Du hast die Rolle **🌬️ Klima-Abo**! Bei Verfügbarkeit wird die Rolle im Kanal gepingt. 📣🤠'
+            : '⚠️ Konnte die Rolle nicht vergeben — Bot-Recht „Rollen verwalten" + Rollen-Hierarchie prüfen.';
+        } else {                                               // Fallback: Kanal-Mention
+          if(userId && channelId){
+            if(!channelSubs.has(channelId)) channelSubs.set(channelId, new Set());
+            channelSubs.get(channelId).add(userId); saveSubs();
+          }
+          content = '✅ Eingetragen! Bei Verfügbarkeit **pinge ich dich hier im Kanal**. 📣🤠';
         }
-        content = '✅ Eingetragen! Bei Verfügbarkeit **pinge ich dich hier im Kanal**. 📣🤠';
       } else if(name === 'unnotifyme'){
-        if(userId){ unsubscribeEverywhere(userId); notifiedDiscord.delete(userId); saveSubs(); }
-        content = '🔕 Abgemeldet (DM **und** Kanal). Keine Klima-Meldungen mehr für dich.';
+        if(userId){ unsubscribeEverywhere(userId); notifiedDiscord.delete(userId); saveSubs(); await removeRole(userId); }
+        content = '🔕 Abgemeldet (DM, Kanal **und** Rolle entfernt). Keine Klima-Meldungen mehr für dich.';
       } else {
         content = 'Unbekannter Befehl.';
       }
