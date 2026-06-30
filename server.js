@@ -58,7 +58,8 @@ const IDLE_SEC           = Math.max(2,  parseInt(env.IDLE_SEC || env.CHECK_INTER
 const ACTIVE_SEC         = Math.max(1,  parseInt(env.ACTIVE_SEC         || '2', 10));   // Takt SOLANGE verfuegbar (engmaschig)
 const CONFIRM_PROBES     = Math.max(1,  parseInt(env.CONFIRM_PROBES     || '3', 10));   // Schnell-Verify gegen CDN-Ausreisser
 const CONFIRM_GAP_MS     = Math.max(200,parseInt(env.CONFIRM_GAP_MS     || '600',10));  // kurzer Abstand im Verify-Modus
-const GONE_CONFIRM       = Math.max(1,  parseInt(env.GONE_CONFIRM       || '3', 10));   // so viele Checks "weg" in Folge -> erst dann re-armed (Anti-Flacker-Spam)
+const GONE_CONFIRM       = Math.max(1,  parseInt(env.GONE_CONFIRM       || '3', 10));   // so viele Checks "weg" in Folge -> erst dann re-armed
+const NOTIFY_COOLDOWN_MS = Math.max(0,  parseInt(env.NOTIFY_COOLDOWN_MIN || '15', 10))*60000; // min. Abstand zwischen 2 Meldungen (gegen Flacker-Spam)
 const KEEPALIVE_MIN      = Math.max(1,  parseInt(env.KEEPALIVE_MIN      || '10', 10));  // Self-Ping-Takt
 const SELF_URL           = env.RENDER_EXTERNAL_URL || env.SELF_URL || '';               // Render setzt das automatisch
 const UPDATES_SEC        = Math.max(5,  parseInt(env.UPDATES_SEC       || '20', 10));   // Abo-Erkennung
@@ -135,15 +136,7 @@ function availText(){
   return `${availLine || pickFunny()}\n\n🟢 Jetzt kaufbar:\n${PRODUCT_URL}\n⚡ SCHNELL – ist meist in <1 Min weg!`;
 }
 async function broadcastAvailable(){
-  for(const id of subscribers){
-    if(!notified.has(id)){
-      await tgSend(id, availText());
-      notified.add(id);
-    }
-  }
-}
-async function broadcastGone(){
-  for(const id of subscribers) await tgSend(id, `🔴 Wieder ausverkauft. Du wirst beim nächsten Mal automatisch erneut benachrichtigt.`);
+  for(const id of subscribers) await tgSend(id, availText());   // Frequenz wird per Cooldown begrenzt
 }
 
 // ---------- Discord-Abos: /notify-me-dm (DM) + /notify-me-here (Kanal) ----------
@@ -221,7 +214,6 @@ async function channelPost(channelId, userIds, text){
   }catch(e){ console.log('[chan]', e.message); return false; }
 }
 // ---------- Rolle "Klima-Abo" (sichtbares Abzeichen + @-Ping) ----------
-let rolePinged = false;   // pro Verfuegbarkeits-Fenster nur 1 Rollen-Ping
 async function assignRole(uid){
   if(!DISCORD_BOT_TOKEN || !DISCORD_GUILD_ID || !DISCORD_ROLE_ID) return false;
   try{ const r = await fetch(`https://discord.com/api/v10/guilds/${DISCORD_GUILD_ID}/members/${uid}/roles/${DISCORD_ROLE_ID}`,{ method:'PUT', headers:dHeaders() });
@@ -240,17 +232,8 @@ async function pingRole(){
 }
 
 async function notifyDiscord(){
-  // DM-Abonnenten
-  for(const uid of dmSubs){
-    if(!notifiedDiscord.has(uid)){ if(await discordDM(uid, availText())) notifiedDiscord.add(uid); }
-  }
-  // Rolle "Klima-Abo": 1 Ping pro Fenster im Notify-Kanal
-  if(DISCORD_ROLE_ID && !rolePinged){ if(await pingRole()) rolePinged = true; }
-  // (Fallback) Kanal-Abos ohne Rolle: pro Kanal eine Nachricht mit Mentions
-  for(const [ch, us] of channelSubs){
-    const fresh = [...us].filter(u=>!notifiedDiscord.has(u));
-    if(fresh.length && await channelPost(ch, fresh, availText())) fresh.forEach(u=>notifiedDiscord.add(u));
-  }
+  for(const uid of dmSubs) await discordDM(uid, availText());   // DM-Abonnenten
+  if(DISCORD_ROLE_ID) await pingRole();                          // EIN @Klima-Abo-Ping im Kanal
 }
 
 function fmtTime(iso){ return iso ? iso.slice(0,16).replace('T',' ')+' UTC' : '–'; }
@@ -354,21 +337,29 @@ async function check(){
         }
         windowChecks++;
         wasAvailable = true; goneStreak = 0;
-        await broadcastAvailable();                 // Telegram: alle noch nicht informierten User
-        await notifyDiscord();                      // Discord: DM- + Kanal-Abos (jeder 1x pro Fenster)
+        // COOLDOWN: max. 1 Meldung pro NOTIFY_COOLDOWN_MS -> kein Flacker-Spam
+        const lastNotify = +(dbGet('last_notify_at')||0);
+        if(Date.now() - lastNotify >= NOTIFY_COOLDOWN_MS){
+          if(!availLine) availLine = pickFunny();
+          await broadcastAvailable();   // Telegram
+          await notifyDiscord();        // Discord: DM + EIN @Klima-Abo-Ping
+          dbSet('last_notify_at', Date.now()); dbEvent('notify');
+          console.log('[notify] Meldung raus');
+        } else {
+          console.log('[notify] unterdrueckt (Cooldown aktiv)');
+        }
       } else {
         // Hysterese: erst nach GONE_CONFIRM Checks "weg" in Folge re-armen
         goneStreak++;
         if(goneStreak >= GONE_CONFIRM){
           if(wasAvailable){
             const dur = Math.round((Date.now()-availableSince)/1000);
-            await broadcastGone(); dbEvent('gone', `${dur}s verfuegbar`);
+            dbEvent('gone', `${dur}s verfuegbar`);
             if(db && currentWindowId){ try{ db.prepare('UPDATE availability_windows SET gone_at=?, duration_sec=?, checks_during=? WHERE id=?')
                                               .run(new Date().toISOString(), dur, windowChecks, currentWindowId); }catch{} dailyBump('avail_seconds', dur); }
             currentWindowId = null;
           }
           wasAvailable = false;
-          notified.clear(); notifiedDiscord.clear(); rolePinged = false;   // re-arm: naechstes Mal wieder alle
         }
       }
     }
