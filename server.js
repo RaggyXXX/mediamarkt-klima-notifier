@@ -17,6 +17,7 @@
 import http from 'node:http';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import { startPortaSplit, getPortaSnapshot } from './portasplit.mjs';   // PortaSplit-Watcher (gleicher Prozess)
 
 const env = process.env;
 const PORT            = env.PORT || 10000;
@@ -53,6 +54,7 @@ const SOLD_OUT_MARKER = env.SOLD_OUT_MARKER || 'mms-cofr-delivery_NOT_AVAILABLE'
 const IN_STOCK_MARKER = env.IN_STOCK_MARKER || 'mms-cofr-delivery_AVAILABLE';
 const A2C_MARKER      = env.A2C_MARKER      || 'cofr-add-to-basket-button';
 const BLOCKED_MARKER  = env.BLOCKED_MARKER  || 'Reference&#32;ID';
+const DELIVERY_WIDGET = env.DELIVERY_WIDGET || 'mms-cofr-delivery';   // Liefer-Widget-Anker (Sanity: muss server-seitig gerendert sein)
 // Adaptives Polling: langsam wenn ausverkauft, schnell sobald "verfuegbar" gewittert wird.
 const IDLE_SEC           = Math.max(2,  parseInt(env.IDLE_SEC || env.CHECK_INTERVAL_SEC || '4', 10)); // Takt wenn NICHT verfuegbar (~3-5s)
 const ACTIVE_SEC         = Math.max(1,  parseInt(env.ACTIVE_SEC         || '2', 10));   // Takt SOLANGE verfuegbar (engmaschig)
@@ -66,6 +68,18 @@ const UPDATES_SEC        = Math.max(5,  parseInt(env.UPDATES_SEC       || '20', 
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 const sleep = ms => new Promise(r=>setTimeout(r,ms));
+
+// ---------- fetch mit hartem Timeout ----------
+// Ohne Timeout kann EIN haengender Request den ganzen Poll-Loop dauerhaft einfrieren
+// (checking bleibt true). AbortController erzwingt ein Ende -> Loop laeuft immer weiter.
+const FETCH_TIMEOUT_MS = Math.max(2000, parseInt(env.FETCH_TIMEOUT_MS || '12000', 10));
+const PROBE_TIMEOUT_MS = Math.max(2000, parseInt(env.PROBE_TIMEOUT_MS || '10000', 10));
+async function fetchT(url, opts={}, ms=FETCH_TIMEOUT_MS){
+  const ac = new AbortController();
+  const t = setTimeout(()=>ac.abort(new Error('timeout')), ms);
+  try { return await fetch(url, { ...opts, signal: ac.signal }); }
+  finally { clearTimeout(t); }
+}
 
 // ---------- SQLite (Node-eingebaut, sammelt Statistik) ----------
 // Hinweis: Render-Free-Disk ist ephemer -> Daten resetten bei Redeploy.
@@ -170,15 +184,16 @@ let wasAvailable = false;
 let goneStreak = 0;
 let availLine = '';          // gewaehlter Spruch fuers aktuelle Verfuegbarkeits-Fenster
 let last = null, errStreak = 0, tgOffset = 0, checking = false;
+let driftAlerted = false, lastCheckAt = Date.now();   // Drift-Warnung (einmalig) + Watchdog-Heartbeat
 
 // ---------- Telegram ----------
 async function tgSend(chatId, text){
   if(!BOT_TOKEN){ console.log('[tg] (kein Token) ->', chatId, text.slice(0,40)); return; }
   try{
-    const r = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`,{
+    const r = await fetchT(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`,{
       method:'POST', headers:{'content-type':'application/json'},
       body: JSON.stringify({ chat_id: chatId, text, disable_web_page_preview:false })
-    });
+    }, 8000);
     if(!r.ok) console.log('[tg] HTTP', r.status, await r.text());
   }catch(e){ console.log('[tg]', e.message); }
 }
@@ -186,7 +201,7 @@ function availText(){
   return `${availLine || pickFunny()}\n\n🟢 Jetzt kaufbar:\n${PRODUCT_URL}\n⚡ SCHNELL – ist meist in <1 Min weg!`;
 }
 async function broadcastAvailable(){
-  for(const id of subscribers) await tgSend(id, availText());   // Frequenz wird per Cooldown begrenzt
+  await Promise.all([...subscribers].map(id => tgSend(id, availText())));   // parallel -> haelt den Loop kuerzer; Frequenz per Cooldown begrenzt
 }
 
 // ---------- Discord-Abos: /notify-me-dm (DM) + /notify-me-here (Kanal) ----------
@@ -245,10 +260,10 @@ async function saveSubsRemote(){
 async function discordDM(userId, text){
   if(!DISCORD_BOT_TOKEN) return false;
   try{
-    const chRes = await fetch('https://discord.com/api/v10/users/@me/channels',{ method:'POST', headers:dHeaders(), body:JSON.stringify({ recipient_id:userId }) });
+    const chRes = await fetchT('https://discord.com/api/v10/users/@me/channels',{ method:'POST', headers:dHeaders(), body:JSON.stringify({ recipient_id:userId }) }, 8000);
     const ch = await chRes.json();
     if(!ch.id){ console.log('[dm] kein Kanal fuer', userId, JSON.stringify(ch).slice(0,120)); return false; }
-    const r = await fetch(`https://discord.com/api/v10/channels/${ch.id}/messages`,{ method:'POST', headers:dHeaders(), body:JSON.stringify({ content:text }) });
+    const r = await fetchT(`https://discord.com/api/v10/channels/${ch.id}/messages`,{ method:'POST', headers:dHeaders(), body:JSON.stringify({ content:text }) }, 8000);
     if(!r.ok){ console.log('[dm] HTTP', r.status, await r.text()); return false; }
     return true;
   }catch(e){ console.log('[dm]', e.message); return false; }
@@ -276,13 +291,13 @@ async function removeRole(uid){
 async function pingRole(){
   if(!DISCORD_BOT_TOKEN || !DISCORD_ROLE_ID || !DISCORD_NOTIFY_CHANNEL_ID) return false;
   const content = `<@&${DISCORD_ROLE_ID}>\n${availText()}`;
-  try{ const r = await fetch(`https://discord.com/api/v10/channels/${DISCORD_NOTIFY_CHANNEL_ID}/messages`,{ method:'POST', headers:dHeaders(),
-        body:JSON.stringify({ content, allowed_mentions:{ roles:[DISCORD_ROLE_ID] } }) });
+  try{ const r = await fetchT(`https://discord.com/api/v10/channels/${DISCORD_NOTIFY_CHANNEL_ID}/messages`,{ method:'POST', headers:dHeaders(),
+        body:JSON.stringify({ content, allowed_mentions:{ roles:[DISCORD_ROLE_ID] } }) }, 8000);
        if(!r.ok) console.log('[rping]', r.status, await r.text()); return r.ok; }catch(e){ console.log('[rping]', e.message); return false; }
 }
 
 async function notifyDiscord(){
-  for(const uid of dmSubs) await discordDM(uid, availText());   // DM-Abonnenten
+  await Promise.all([...dmSubs].map(uid => discordDM(uid, availText())));   // DM-Abonnenten parallel
   if(DISCORD_ROLE_ID) await pingRole();                          // EIN @Klima-Abo-Ping im Kanal
 }
 
@@ -327,19 +342,30 @@ function verifyDiscordSig(sig, ts, rawBody){
 
 // ---------- EIN Abruf (KEIN Cache-Busting -> stabiler, korrekter Status) ----------
 async function probe(){
-  let status=0, html='', t0=Date.now();
-  try{
-    const r = await fetch(PRODUCT_URL,{ headers:{ 'user-agent':UA, 'accept-language':'de-DE,de;q=0.9' }});
-    status = r.status; html = await r.text();
-  }catch(e){ html=''; }
+  const t0 = Date.now();
+  let status=0, html='';
+  for(let attempt=0; attempt<2; attempt++){
+    try{
+      const r = await fetchT(PRODUCT_URL,{ headers:{ 'user-agent':UA, 'accept-language':'de-DE,de;q=0.9' }}, PROBE_TIMEOUT_MS);
+      status = r.status; html = await r.text();
+      break;                                           // Antwort da -> kein Retry
+    }catch(e){
+      status=0; html='';
+      if(attempt===0){ await sleep(400); continue; }   // ein schneller Retry bei Netz-/Timeout-Fehler
+    }
+  }
   const ms = Date.now()-t0;
-  const sane    = html.includes(SKU);
   const blocked = html.includes(BLOCKED_MARKER);
+  const widget  = html.includes(DELIVERY_WIDGET);            // Liefer-Widget ueberhaupt gerendert?
+  const sane    = html.includes(SKU) && widget;             // Seite korrekt geladen UND Widget vorhanden
   const soldOut = html.includes(SOLD_OUT_MARKER);
   const inStock = html.includes(IN_STOCK_MARKER) && html.includes(A2C_MARKER);
   const pageOk  = status===200 && sane && !blocked;
   const available = pageOk && inStock && !soldOut;
-  return { status, sane, blocked, soldOut, inStock, pageOk, available, ms };
+  // Marker-Drift: HTTP 200, SKU da, nicht geblockt — aber das Liefer-Widget FEHLT.
+  // => MediaMarkt hat vermutlich Layout/Marker geaendert; sonst wuerden wir jeden Restock STILL verpassen.
+  const drift = status===200 && !blocked && html.includes(SKU) && !widget;
+  return { status, sane, widget, blocked, soldOut, inStock, pageOk, available, drift, ms };
 }
 
 // ---------- Pruefung mit Schnell-Bestaetigung ----------
@@ -369,11 +395,19 @@ async function check(){
     if(!p.pageOk){
       // transienter Fehler/Block -> Zustand NICHT aendern (kein Fehlalarm, kein Reset)
       errStreak++; dbInc('error_checks'); dailyBump('errors');
-      if(errStreak===5){ dbEvent('error', `HTTP ${p.status} sane=${p.sane} blocked=${p.blocked}`);
+      // Marker-Drift: sofort + einmalig LAUT warnen — sonst verpassen wir jeden Restock still.
+      if(p.drift && !driftAlerted){
+        driftAlerted = true;
+        dbEvent('drift', 'Liefer-Widget fehlt trotz HTTP 200 – Layout/Marker geaendert?');
+        const warn = '⚠️ ACHTUNG: Seite lädt (HTTP 200), aber das Liefer-Widget fehlt. Vermutlich hat MediaMarkt Layout/Marker geändert — der Notifier erkennt Verfügbarkeit evtl. NICHT mehr! Bitte Marker prüfen.';
+        for(const id of subscribers) await tgSend(id, warn);
+        for(const uid of dmSubs)      await discordDM(uid, warn);
+      }
+      if(errStreak===5){ dbEvent('error', `HTTP ${p.status} sane=${p.sane} blocked=${p.blocked} drift=${p.drift}`);
         for(const id of subscribers)
           await tgSend(id, `⚠️ Notifier-Problem (HTTP ${p.status}, sane=${p.sane}, blocked=${p.blocked}). Evtl. IP geblockt → Intervall erhöhen.`); }
     } else {
-      errStreak = 0;
+      errStreak = 0; driftAlerted = false;
       if(available){
         const becameAvailable = !wasAvailable;     // echter Zustandswechsel?
         if(becameAvailable){
@@ -416,14 +450,14 @@ async function check(){
       }
     }
     return last;
-  } finally { checking = false; }
+  } finally { checking = false; lastCheckAt = Date.now(); }   // Heartbeat fuer den Watchdog
 }
 
 // ---------- Abo-Erkennung: wer dem Bot schreibt, wird aufgenommen ----------
 async function pollUpdates(){
   if(!BOT_TOKEN) return;
   try{
-    const r = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/getUpdates?timeout=0&offset=${tgOffset}`);
+    const r = await fetchT(`https://api.telegram.org/bot${BOT_TOKEN}/getUpdates?timeout=0&offset=${tgOffset}`, {}, 8000);
     const d = await r.json();
     for(const u of d.result||[]){
       tgOffset = u.update_id + 1;
@@ -449,13 +483,43 @@ async function loop(){
 }
 loop();
 
+// ---------- Watchdog: erkennt einen haengenden Loop und wirft ihn neu an ----------
+// Sicherheitsnetz fuer den Fall, dass check() trotz Timeouts je verklemmt (checking bleibt true).
+setInterval(()=>{
+  const ageMs = Date.now() - lastCheckAt;
+  const maxMs = Math.max(60000, IDLE_SEC*1000*10);   // > 10 Zyklen ohne fertigen Check = verklemmt
+  if(ageMs > maxMs){
+    console.log(`[watchdog] kein Check seit ${Math.round(ageMs/1000)}s -> Reset & Loop-Neustart`);
+    dbEvent('watchdog', `stall ${Math.round(ageMs/1000)}s`);
+    checking = false;          // evtl. verklemmtes Flag loesen
+    lastCheckAt = Date.now();  // Doppel-Reset vermeiden
+    loop();                    // Loop neu anwerfen
+  }
+}, 30000);
+
 setInterval(()=>pollUpdates().catch(()=>{}), UPDATES_SEC*1000);
-if(SELF_URL) setInterval(()=>fetch(SELF_URL.replace(/\/$/,'')+'/walkietalkie').catch(()=>{}), KEEPALIVE_MIN*60*1000);
+if(SELF_URL) setInterval(()=>fetchT(SELF_URL.replace(/\/$/,'')+'/walkietalkie', {}, 8000).catch(()=>{}), KEEPALIVE_MIN*60*1000);
 pollUpdates().catch(()=>{});
 loadSubsRemote().catch(()=>{});   // persistente Abo-Liste aus Discord laden
 tursoInit().catch(e=>console.log('[turso] init', e.message));   // dauerhafte Stats aus Turso wiederherstellen
 setInterval(()=>flushToTurso().catch(()=>{}), 2*60*1000);       // alle 2 Min nach Turso sichern
 for(const sig of ['SIGTERM','SIGINT']) process.on(sig, async()=>{ await flushToTurso().catch(()=>{}); process.exit(0); });  // beim Recycle sichern
+
+// ---------- Absturz-Netze: lieber loggen & weiterlaufen als sterben ----------
+process.on('unhandledRejection', e => console.log('[unhandledRejection]', (e && e.message) || e));
+process.on('uncaughtException',  e => console.log('[uncaughtException]',  (e && e.message) || e));
+
+// ---------- PortaSplit-Watcher: laeuft im selben Prozess, meldet ueber dieselben Kanaele ----------
+async function portaAlert({ title, message, url }){
+  const text = `${title}\n${message}${url ? '\n'+url : ''}`;
+  await Promise.all([...subscribers].map(id => tgSend(id, text)));        // Telegram-Empfaenger
+  await Promise.all([...dmSubs].map(uid => discordDM(uid, text)));        // Discord-DM-Abos
+  if(DISCORD_BOT_TOKEN && DISCORD_ROLE_ID && DISCORD_NOTIFY_CHANNEL_ID){  // Discord Rollen-Ping (eigener Text)
+    await fetchT(`https://discord.com/api/v10/channels/${DISCORD_NOTIFY_CHANNEL_ID}/messages`, { method:'POST', headers:dHeaders(),
+      body: JSON.stringify({ content:`<@&${DISCORD_ROLE_ID}>\n${text}`, allowed_mentions:{ roles:[DISCORD_ROLE_ID] } }) }, 8000).catch(()=>{});
+  }
+}
+startPortaSplit(portaAlert);
 
 // ---------- HTTP ----------
 let DASHBOARD=''; try{ DASHBOARD = fs.readFileSync('./public/index.html','utf8'); }catch(e){ console.log('[ui] index.html fehlt:', e.message); }
@@ -508,6 +572,7 @@ const server = http.createServer(async (req,res)=>{
     return json(200, { type:1 });
   }
   if(url.pathname === '/walkietalkie') return json(200, { awake:true, t:new Date().toISOString() }); // Stay-Awake-Ping (cron-job.org)
+  if(url.pathname === '/portasplit') return json(200, { ts:new Date().toISOString(), sources:getPortaSnapshot() }); // PortaSplit-Status
   if(url.pathname === '/check')     return json(200, await check().catch(e=>({error:e.message})));
   if(url.pathname === '/stats'){
     const tc=+(dbGet('total_checks')||0), ac=+(dbGet('available_checks')||0);
