@@ -28,6 +28,11 @@ export const SOURCES = [
     method: 'obi-api', via: 'fetch', articleId: '2191158911022', maxPrice: 799,
     url: 'https://www.obi.de/p/2191158911022/midea-split-klimaanlage-portasplit-cool-mobil-weissgrau' },
 
+  // ---------- Galaxus (impit gegen 403; Textmarker; online-only) ----------
+  { id: 'galaxus:portasplit', retailer: 'Galaxus', product: 'PortaSplit', tier: 'impit',
+    method: 'galaxus', via: 'impit', maxPrice: 899,
+    url: 'https://www.galaxus.de/de/s2/product/midea-porta-split-42-m-12000-btuh-klimaanlage-40851329' },
+
   // ---------- Amazon (eigener Parser, konservative Rate; Scalper-anfaellig -> Preis-Deckel!) ----------
   { id: 'amazon:portasplit', retailer: 'Amazon', product: 'PortaSplit', tier: 'amazon',
     method: 'amazon', via: 'fetch', maxPrice: 899, url: 'https://www.amazon.de/dp/B0D3PP64JS' },

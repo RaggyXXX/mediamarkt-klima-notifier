@@ -99,6 +99,13 @@ function amazonBuyboxPrice(body) {
         || body.match(/a-offscreen"?\s*>\s*([\d.,]+)\s*(?:€|&#8364;|&euro;)/i);
   return m ? m[1] : null;
 }
+// ---- Galaxus: kein schema.org -> Textmarker (via impit, sonst 403) ----
+function galaxusParse(body) {
+  if (/nicht (mehr )?lieferbar|nicht verf[uü]gbar|ausverkauft/i.test(body)) return { avail: 'none', note: 'nicht lieferbar' };
+  if (/in den warenkorb|sofort lieferbar|lieferbar ab \d|noch \d+ st[uü]ck|an lager/i.test(body)) return { avail: 'online', note: 'lieferbar' };
+  return { avail: 'unknown', note: 'kein eindeutiger Galaxus-Marker' };
+}
+
 function amazonParse(body) {
   const price = amazonBuyboxPrice(body);
   if (/Derzeit nicht verf[uü]gbar/i.test(body)) return { avail: 'none', price, note: 'Derzeit nicht verfügbar' };
@@ -127,7 +134,9 @@ export async function probeSource(s) {
     if (s.method === 'obi-api') { r = { ...meta, ...(await probeObiApi(s)) }; }
     else {
       const { status, body } = s.via === 'impit' ? await impitFetch(s.url) : await plainFetch(s.url);
-      r = s.method === 'amazon' ? { ...meta, status, ...amazonParse(body) } : { ...meta, status, ...htmlParse(status, body) };
+      r = s.method === 'amazon' ? { ...meta, status, ...amazonParse(body) }
+        : s.method === 'galaxus' ? { ...meta, status, ...galaxusParse(body) }
+        : { ...meta, status, ...htmlParse(status, body) };
     }
   } catch (e) {
     return { ...meta, status: 0, avail: 'unknown', note: 'FEHLER ' + e.message };
