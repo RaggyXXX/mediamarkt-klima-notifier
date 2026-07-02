@@ -28,6 +28,8 @@ export const SOURCES = [
     method: 'obi-api', via: 'fetch', articleId: '2191158911022', maxPrice: 799,
     url: 'https://www.obi.de/p/2191158911022/midea-split-klimaanlage-portasplit-cool-mobil-weissgrau' },
 
+  { id: "expert:portasplit", retailer: "Expert", product: "PortaSplit", tier: "open", method: "expert", via: "fetch", webcode: "32750011559", storeId: "e_2214116", maxPrice: 899, url: "https://www.expert.de/shop/unsere-produkte/haushalt-kuche/wohnklima/klimagerate/32750011559-portasplit-12000-btu.html" },
+
   // ---------- Galaxus (impit gegen 403; Textmarker; online-only) ----------
   { id: 'galaxus:portasplit', retailer: 'Galaxus', product: 'PortaSplit', tier: 'impit',
     method: 'galaxus', via: 'impit', maxPrice: 899,

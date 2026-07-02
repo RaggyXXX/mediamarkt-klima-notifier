@@ -99,6 +99,8 @@ function amazonBuyboxPrice(body) {
         || body.match(/a-offscreen"?\s*>\s*([\d.,]+)\s*(?:€|&#8364;|&euro;)/i);
   return m ? m[1] : null;
 }
+async function probeExpert(s){ const store=s.storeId||"e_2214116"; const r=await fetch(`https://production.brntgs.expert.de/api/pricepds?webcode=${s.webcode}&storeId=${store}`,{headers:{"user-agent":UA,accept:"application/json"}}); if(r.status!==200) return {avail:"none",status:r.status,note:"nicht gelistet (HTTP "+r.status+")"}; let j={};try{j=JSON.parse(await r.text());}catch{} const pr=j.price||{}; const online=pr.onlineButtonAction==="ORDER"||(pr.onlineStock||0)>0; return {avail:online?"online":"none",status:200,price:pr.grossPrice??pr.price??pr.basicPrice??null,note:`online ${pr.onlineStock??"-"} / Filiale ${pr.storeStock??"-"}`}; }
+
 // ---- Galaxus: kein schema.org -> Textmarker (via impit, sonst 403) ----
 function galaxusParse(body) {
   if (/nicht (mehr )?lieferbar|nicht verf[uü]gbar|ausverkauft/i.test(body)) return { avail: 'none', note: 'nicht lieferbar' };
@@ -132,6 +134,7 @@ export async function probeSource(s) {
   let r;
   try {
     if (s.method === 'obi-api') { r = { ...meta, ...(await probeObiApi(s)) }; }
+    else if (s.method === 'expert') { r = { ...meta, ...(await probeExpert(s)) }; }
     else {
       const { status, body } = s.via === 'impit' ? await impitFetch(s.url) : await plainFetch(s.url);
       r = s.method === 'amazon' ? { ...meta, status, ...amazonParse(body) }
