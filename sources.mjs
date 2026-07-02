@@ -25,7 +25,7 @@ export const SOURCES = [
     method: 'obi-api', via: 'fetch', articleId: '8620890', postalCode: '30159', maxPrice: 899,
     url: 'https://www.obi.de/p/8620890/midea-mobile-split-klimaanlage-portasplit' },
   { id: 'obi:cool', retailer: 'OBI', product: 'PortaSplit Cool', tier: 'open',
-    method: 'html', via: 'fetch', maxPrice: 799,
+    method: 'obi-api', via: 'fetch', articleId: '2191158911022', maxPrice: 799,
     url: 'https://www.obi.de/p/2191158911022/midea-split-klimaanlage-portasplit-cool-mobil-weissgrau' },
 
   // ---------- Amazon (eigener Parser, konservative Rate; Scalper-anfaellig -> Preis-Deckel!) ----------

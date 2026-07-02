@@ -31,7 +31,7 @@ const log = (...a) => console.log('[porta]', ...a);
 const state = {};   // id -> { active, avail, goneStreak, lastStatus, lastSeen }
 let ALERT = async () => {};
 
-function label(a) { return { online: 'ONLINE bestellbar', store: 'im Markt vorrätig', none: 'ausverkauft', unknown: 'unklar' }[a] || a; }
+function label(a) { return { online: 'ONLINE bestellbar', store: 'im Markt vorrätig', 'store-remote': 'Markt zu weit', none: 'ausverkauft', overpriced: 'überteuert', unknown: 'unklar' }[a] || a; }
 
 // Warum meldenswert? avail online/store ODER Seite war 404 und ist jetzt 200 (Restock).
 function activeReason(r, prevStatus) {

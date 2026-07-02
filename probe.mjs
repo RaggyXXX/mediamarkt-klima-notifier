@@ -10,6 +10,12 @@ import { SOURCES } from './sources.mjs';
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
+// ---- Standort/Umkreis (einstellbar) ----
+// Default: Hameln, 30 km. Marktabholung wird nur gemeldet, wenn eine Filiale
+// innerhalb des Umkreises liegt; sonst zaehlt nur Online-Verfuegbarkeit.
+export const HOME_PLZ = process.env.PS_HOME_PLZ || process.env.OBI_POSTAL_CODE || '31785';   // Hameln
+export const RADIUS_KM = parseFloat(process.env.PS_RADIUS_KM || '30');
+
 // impit lazy laden (nur fuer via:'impit')
 let Impit = null, Browser = null, impitClient = null;
 async function impitFetch(url) {
@@ -58,26 +64,32 @@ const OOS_RX = /nicht (mehr )?verf[uü]gbar|nicht lieferbar|ausverkauft|derzeit 
 const INSTOCK_RX = /in den warenkorb|in den einkaufswagen|jetzt kaufen|auf lager|sofort lieferbar|im markt reservieren/i;
 
 function schemaToAvail(s) {
-  if (/^InStoreOnly$/i.test(s)) return 'store';
+  // InStoreOnly = nur Marktabholung, aber Filiale/Distanz NICHT bekannt (kein OBI-API)
+  // -> 'store-remote' (kein Alert; nur OBI kann per-Filiale im Umkreis pruefen).
+  if (/^InStoreOnly$/i.test(s)) return 'store-remote';
   if (/^(InStock|LimitedAvailability|BackOrder|PreOrder|OnlineOnly)$/i.test(s)) return 'online';
   return 'none';
 }
 
 // ---- OBI: EIN JSON-Call = Online-Lieferung + Filialbestand (Stueckzahl) ----
 async function probeObiApi(s) {
-  const plz = process.env.OBI_POSTAL_CODE || s.postalCode;
+  const plz = HOME_PLZ;
   const r = await fetch(`https://www.obi.de/api/pdp/v1/availability/${s.articleId}?postalCode=${plz}`,
     { headers: { 'user-agent': UA, accept: 'application/json' } });
   if (r.status !== 200) return { status: r.status, avail: 'unknown', note: 'HTTP ' + r.status };
   let j = {}; try { j = JSON.parse(await r.text()); } catch {}
   const online = (j.deliveryDataPerSeller || []).length > 0;
-  const stores = (j.pickupStores || []).filter(x => (x.availableQuantity || 0) > 0)
-    .map(x => ({ name: (x.pickupName || '').replace('OBI Markt ', ''), qty: x.availableQuantity, price: x.price }));
-  const price = stores[0]?.price || (j.deliveryDataPerSeller || [])[0]?.price || null;
-  const avail = online ? 'online' : (stores.length ? 'store' : 'none');
-  const note = [online ? 'online lieferbar' : '', stores.length ? stores.slice(0, 4).map(x => `${x.name}:${x.qty}`).join(', ') : ''].filter(Boolean).join(' | ')
-    || `nichts nahe PLZ ${s.postalCode}`;
-  return { status: 200, avail, price, stores, note };
+  const inStock = (j.pickupStores || []).filter(x => (x.availableQuantity || 0) > 0)
+    .map(x => ({ name: (x.pickupName || '').replace('OBI Markt ', ''), qty: x.availableQuantity, price: x.price, km: x.pickupDistance ?? null }));
+  const near = inStock.filter(x => x.km != null && x.km <= RADIUS_KM).sort((a, b) => a.km - b.km);
+  const price = near[0]?.price || inStock[0]?.price || (j.deliveryDataPerSeller || [])[0]?.price || null;
+  // online -> immer; sonst Filiale im Umkreis -> 'store'; sonst Filiale nur weiter weg -> 'store-remote' (kein Alert)
+  const avail = online ? 'online' : (near.length ? 'store' : (inStock.length ? 'store-remote' : 'none'));
+  const note = online ? 'online lieferbar'
+    : near.length ? `${near.length} Filiale(n) ≤${RADIUS_KM}km: ${near.slice(0, 4).map(x => `${x.name} ${x.km}km:${x.qty}`).join(', ')}`
+    : inStock.length ? `nur weiter weg (>${RADIUS_KM}km, ${inStock.length} Filialen) – nur online zaehlt`
+    : `nichts nahe PLZ ${plz}`;
+  return { status: 200, avail, price, stores: near, note };
 }
 
 // ---- Amazon: kein zuverlaessiges schema.org -> Buybox-Marker + Buybox-Preis ----
@@ -129,7 +141,7 @@ export function isAvailable(avail) { return avail === 'online' || avail === 'sto
 async function cli() {
   const only = process.argv[2];
   const list = only ? SOURCES.filter(s => s.retailer.toLowerCase() === only.toLowerCase() || s.id.startsWith(only)) : SOURCES;
-  const icon = a => ({ online: '🟢 ONLINE', store: '🟡 ABHOLUNG', none: '⚪ nicht verf.', overpriced: '💸 überteuert', unknown: '❓ unklar' }[a] || '❓');
+  const icon = a => ({ online: '🟢 ONLINE', store: '🟡 ABHOLUNG', 'store-remote': '📍 zu weit', none: '⚪ nicht verf.', overpriced: '💸 überteuert', unknown: '❓ unklar' }[a] || '❓');
   console.log('\n=== PortaSplit-Monitor: Verfuegbarkeit ===\n');
   for (const s of list) {
     const r = await probeSource(s);
