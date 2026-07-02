@@ -27,6 +27,33 @@ async function plainFetch(url, accept = 'text/html,application/xhtml+xml') {
 
 const SCHEMA_RX = /schema\.org\/(InStock|OutOfStock|LimitedAvailability|BackOrder|PreOrder|SoldOut|Discontinued|OnlineOnly|InStoreOnly)/i;
 const PRICE_RX = /"price"\s*:\s*"?([0-9]+(?:[.,][0-9]{1,2})?)"?/i;
+
+// Preis robust in Zahl wandeln — auch deutsches Format "1.979,00" und Zahlen.
+function parseEuro(v) {
+  if (v == null) return null;
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+  let s = String(v).trim();
+  if (s.includes(',')) s = s.replace(/\./g, '').replace(',', '.');   // 1.979,00 -> 1979.00
+  const n = parseFloat(s);
+  return Number.isFinite(n) ? n : null;
+}
+
+// Preis-Deckel-Gate: ueberteuerte (Scalper-)Angebote NICHT als verfuegbar melden.
+function applyPriceGate(s, r) {
+  const pn = parseEuro(r.price);
+  if (pn != null) r.priceNum = pn;
+  if (r.avail === 'online' || r.avail === 'store') {
+    if (pn != null && s.maxPrice && pn > s.maxPrice) {
+      r.avail = 'overpriced';
+      r.note = `überteuert ${pn.toFixed(2)}€ > Limit ${s.maxPrice}€ (Scalper?) – kein Alert`;
+    } else if (pn == null && s.retailer === 'Amazon') {
+      // Amazon ist scalper-anfaellig -> ohne lesbaren Preis NICHT melden.
+      r.avail = 'unknown';
+      r.note = 'Preis nicht lesbar (Amazon) – kein Alert ohne Preis-Check';
+    }
+  }
+  return r;
+}
 const OOS_RX = /nicht (mehr )?verf[uü]gbar|nicht lieferbar|ausverkauft|derzeit nicht|benachrichtige mich|vergriffen|momentan nicht/i;
 const INSTOCK_RX = /in den warenkorb|in den einkaufswagen|jetzt kaufen|auf lager|sofort lieferbar|im markt reservieren/i;
 
@@ -53,12 +80,19 @@ async function probeObiApi(s) {
   return { status: 200, avail, price, stores, note };
 }
 
-// ---- Amazon: kein zuverlaessiges schema.org -> Buybox-Marker ----
+// ---- Amazon: kein zuverlaessiges schema.org -> Buybox-Marker + Buybox-Preis ----
+function amazonBuyboxPrice(body) {
+  const m = body.match(/corePrice[\s\S]{0,700}?a-offscreen"?\s*>\s*([\d.,]+)\s*(?:€|&#8364;|&euro;|EUR)/i)
+        || body.match(/priceToPay[\s\S]{0,400}?a-offscreen"?\s*>\s*([\d.,]+)\s*(?:€|&#8364;)/i)
+        || body.match(/a-offscreen"?\s*>\s*([\d.,]+)\s*(?:€|&#8364;|&euro;)/i);
+  return m ? m[1] : null;
+}
 function amazonParse(body) {
-  if (/Derzeit nicht verf[uü]gbar/i.test(body)) return { avail: 'none', note: 'Derzeit nicht verfügbar' };
+  const price = amazonBuyboxPrice(body);
+  if (/Derzeit nicht verf[uü]gbar/i.test(body)) return { avail: 'none', price, note: 'Derzeit nicht verfügbar' };
   if (/id="add-to-cart-button"/i.test(body) || /Nur noch \d+ auf Lager/i.test(body) || /\bAuf Lager\./i.test(body))
-    return { avail: 'online', note: 'kaufbar (add-to-cart)' };
-  return { avail: 'unknown', note: 'kein eindeutiger Amazon-Marker (pruefen!)' };
+    return { avail: 'online', price, note: 'kaufbar (add-to-cart)' };
+  return { avail: 'unknown', price, note: 'kein eindeutiger Amazon-Marker (pruefen!)' };
 }
 
 // ---- Generisch: PDP holen; 404->none, sonst schema.org / OOS-Text / live ----
@@ -76,14 +110,17 @@ function htmlParse(status, body) {
 
 export async function probeSource(s) {
   const meta = { id: s.id, retailer: s.retailer, product: s.product, url: s.url, via: s.via, tier: s.tier };
+  let r;
   try {
-    if (s.method === 'obi-api') return { ...meta, ...(await probeObiApi(s)) };
-    const { status, body } = s.via === 'impit' ? await impitFetch(s.url) : await plainFetch(s.url);
-    if (s.method === 'amazon') return { ...meta, status, ...amazonParse(body), price: (body.match(PRICE_RX) || [])[1] || null };
-    return { ...meta, status, ...htmlParse(status, body) };
+    if (s.method === 'obi-api') { r = { ...meta, ...(await probeObiApi(s)) }; }
+    else {
+      const { status, body } = s.via === 'impit' ? await impitFetch(s.url) : await plainFetch(s.url);
+      r = s.method === 'amazon' ? { ...meta, status, ...amazonParse(body) } : { ...meta, status, ...htmlParse(status, body) };
+    }
   } catch (e) {
     return { ...meta, status: 0, avail: 'unknown', note: 'FEHLER ' + e.message };
   }
+  return applyPriceGate(s, r);
 }
 
 export function isAvailable(avail) { return avail === 'online' || avail === 'store'; }
@@ -92,7 +129,7 @@ export function isAvailable(avail) { return avail === 'online' || avail === 'sto
 async function cli() {
   const only = process.argv[2];
   const list = only ? SOURCES.filter(s => s.retailer.toLowerCase() === only.toLowerCase() || s.id.startsWith(only)) : SOURCES;
-  const icon = a => ({ online: '🟢 ONLINE', store: '🟡 ABHOLUNG', none: '⚪ nicht verf.', unknown: '❓ unklar' }[a] || '❓');
+  const icon = a => ({ online: '🟢 ONLINE', store: '🟡 ABHOLUNG', none: '⚪ nicht verf.', overpriced: '💸 überteuert', unknown: '❓ unklar' }[a] || '❓');
   console.log('\n=== PortaSplit-Monitor: Verfuegbarkeit ===\n');
   for (const s of list) {
     const r = await probeSource(s);

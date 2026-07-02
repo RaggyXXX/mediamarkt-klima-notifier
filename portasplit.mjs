@@ -35,6 +35,7 @@ function label(a) { return { online: 'ONLINE bestellbar', store: 'im Markt vorr�
 
 // Warum meldenswert? avail online/store ODER Seite war 404 und ist jetzt 200 (Restock).
 function activeReason(r, prevStatus) {
+  if (r.avail === 'overpriced') return null;   // Scalper/Wucherpreis -> nie melden
   if (r.avail === 'online') return 'ONLINE bestellbar';
   if (r.avail === 'store') return 'im Markt vorrätig';
   if (r.status === 200 && prevStatus === 404) return 'Seite wieder online (möglicher Restock – sofort prüfen)';
