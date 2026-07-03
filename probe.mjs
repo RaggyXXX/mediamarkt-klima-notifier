@@ -7,6 +7,7 @@
 //           'none'   = ausverkauft/404   | 'unknown' = kein klares Signal
 // =====================================================================
 import { SOURCES } from './sources.mjs';
+import { amazonAodAvailability } from './amazon-aod.mjs';
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
@@ -135,6 +136,14 @@ export async function probeSource(s) {
   try {
     if (s.method === 'obi-api') { r = { ...meta, ...(await probeObiApi(s)) }; }
     else if (s.method === 'expert') { r = { ...meta, ...(await probeExpert(s)) }; }
+    else if (s.method === 'amazon') {
+      // HART ueber die echte Angebotsliste (AOD) statt Katalogdaten der PDP.
+      const asin = s.asin || (s.url.match(/\/dp\/([A-Z0-9]{10})/) || [])[1];
+      const a = await amazonAodAvailability(asin, s.maxPrice, { requireAmazonShip: !!s.requireAmazonShip });
+      r = { ...meta, status: a.status ?? 200, avail: a.avail, price: a.price ?? null,
+            priceNum: a.price ?? null, note: a.note, seller: a.seller, shipsFrom: a.shipsFrom };
+      return r;   // AOD hat Preis-/Zustand-/Kaufbarkeits-Gate bereits angewandt
+    }
     else {
       const { status, body } = s.via === 'impit' ? await impitFetch(s.url) : await plainFetch(s.url);
       r = s.method === 'amazon' ? { ...meta, status, ...amazonParse(body) }
