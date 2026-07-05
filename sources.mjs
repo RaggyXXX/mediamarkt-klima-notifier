@@ -41,10 +41,10 @@ export const SOURCES = [
   { id: 'amazon:cool', retailer: 'Amazon', product: 'PortaSplit Cool', tier: 'amazon',
     method: 'amazon', via: 'fetch', maxPrice: 799, url: 'https://www.amazon.de/dp/B0GXDWTFR5' },
 
-  // ---------- Bauhaus (impit gegen WAF; PDP schema.org) ----------
-  { id: 'bauhaus:portasplit', retailer: 'Bauhaus', product: 'PortaSplit', tier: 'impit',
+  // ---------- Bauhaus (BRAUCHT BROWSER: Cloudflare -> nur im local-scanner/Pi, auf Render uebersprungen) ----------
+  { id: 'bauhaus:portasplit', retailer: 'Bauhaus', product: 'PortaSplit', tier: 'impit', needsBrowser: true,
     method: 'html', via: 'impit', maxPrice: 899, url: 'https://www.bauhaus.info/p/31934233' },
-  { id: 'bauhaus:cool', retailer: 'Bauhaus', product: 'PortaSplit Cool', tier: 'impit',
+  { id: 'bauhaus:cool', retailer: 'Bauhaus', product: 'PortaSplit Cool', tier: 'impit', needsBrowser: true,
     method: 'html', via: 'impit', maxPrice: 799, url: 'https://www.bauhaus.info/p/33946696' },
 
   // ---------- Hornbach (BROWSERLOS: GraphQL marketModal, Filialbestand mit Stueckzahl) ----------
@@ -52,11 +52,11 @@ export const SOURCES = [
     method: 'hornbach', via: 'fetch', maxPrice: 899, abstractProductId: '12356554',
     url: 'https://www.hornbach.de/p/klimasplitgeraet-midea-portasplit-12-000-btu-105-m-weiss/12356554/' },
 
-  // ---------- Toom (offen; aktuell 404 delisted) ----------
-  { id: 'toom:portasplit', retailer: 'Toom', product: 'PortaSplit', tier: 'open',
+  // ---------- Toom (BRAUCHT BROWSER: Verfuegbarkeit client-gerendert -> nur local-scanner/Pi, auf Render uebersprungen) ----------
+  { id: 'toom:portasplit', retailer: 'Toom', product: 'PortaSplit', tier: 'open', needsBrowser: true,
     method: 'html', via: 'fetch', maxPrice: 899,
     url: 'https://www.toom.de/p/mobiles-klimageraet-portasplit-12000-btuh/9350668' },
-  { id: 'toom:cool', retailer: 'Toom', product: 'PortaSplit Cool', tier: 'open',
+  { id: 'toom:cool', retailer: 'Toom', product: 'PortaSplit Cool', tier: 'open', needsBrowser: true,
     method: 'html', via: 'fetch', maxPrice: 799,
     url: 'https://www.toom.de/p/split-klimaanlage-portasplit-cool-8000btuh/10515238' },
 
@@ -65,11 +65,11 @@ export const SOURCES = [
     method: 'hagebau', via: 'fetch', maxPrice: 899,
     url: 'https://www.hagebau.de/p/midea-klimaanlage-portasplit-anP7004600334/' },
 
-  // ---------- Globus (impit; aktuell 404) ----------
-  { id: 'globus:portasplit', retailer: 'Globus', product: 'PortaSplit', tier: 'impit',
+  // ---------- Globus (BRAUCHT BROWSER: Cloudflare Managed Challenge -> nur local-scanner/Pi, auf Render uebersprungen) ----------
+  { id: 'globus:portasplit', retailer: 'Globus', product: 'PortaSplit', tier: 'impit', needsBrowser: true,
     method: 'html', via: 'impit', maxPrice: 899,
     url: 'https://www.globus-baumarkt.de/p/midea-portasplit-mobile-split-klimaanlage-12000-btu-heiz-kuehlfunktion-0694600235/' },
-  { id: 'globus:cool', retailer: 'Globus', product: 'PortaSplit Cool', tier: 'impit',
+  { id: 'globus:cool', retailer: 'Globus', product: 'PortaSplit Cool', tier: 'impit', needsBrowser: true,
     method: 'html', via: 'impit', maxPrice: 799,
     url: 'https://www.globus-baumarkt.de/p/midea-portasplit-mobile-split-klimaanlage-cool-8000-btu-kuehlfunktion-0694600251/' },
 ];

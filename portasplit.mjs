@@ -89,14 +89,21 @@ async function loopSource(s) {
   }
 }
 
+// Browser-abhaengige Quellen (Bauhaus/Toom/Globus) laufen NICHT browserlos zuverlaessig.
+// Auf Render (kein Browser) werden sie uebersprungen; auf einem Browser-Host (Pi/PC mit
+// local-scanner) via ENABLE_BROWSER_SOURCES=1 reaktivierbar.
+const BROWSER_ON = process.env.ENABLE_BROWSER_SOURCES === '1';
+const ACTIVE = SOURCES.filter(s => BROWSER_ON || !s.needsBrowser);
+
 export function startPortaSplit(alertFn) {
   if (typeof alertFn === 'function') ALERT = alertFn;
-  log(`gestartet: ${SOURCES.length} Quellen (open ${CFG.openSec}s / impit ${CFG.impitSec}s / amazon ${CFG.amazonSec}s)`);
-  SOURCES.forEach(s => loopSource(s));
+  const skipped = SOURCES.length - ACTIVE.length;
+  log(`gestartet: ${ACTIVE.length} Quellen browserlos${skipped ? ` (${skipped} Browser-Quellen uebersprungen – ENABLE_BROWSER_SOURCES=1 zum Aktivieren auf Pi/PC)` : ''} (open ${CFG.openSec}s / impit ${CFG.impitSec}s / amazon ${CFG.amazonSec}s)`);
+  ACTIVE.forEach(s => loopSource(s));
 }
 
 export function getPortaSnapshot() {
-  return SOURCES.map(s => {
+  return ACTIVE.map(s => {
     const st = state[s.id] || {};
     return { id: s.id, retailer: s.retailer, product: s.product, url: s.url,
       active: !!st.active, avail: st.avail || 'none', lastStatus: st.lastStatus ?? null, lastSeen: st.lastSeen || null };
