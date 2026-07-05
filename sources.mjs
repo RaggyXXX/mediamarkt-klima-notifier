@@ -47,9 +47,9 @@ export const SOURCES = [
   { id: 'bauhaus:cool', retailer: 'Bauhaus', product: 'PortaSplit Cool', tier: 'impit',
     method: 'html', via: 'impit', maxPrice: 799, url: 'https://www.bauhaus.info/p/33946696' },
 
-  // ---------- Hornbach (offen; aktuell 404 delisted -> 404->200 ist das Signal) ----------
+  // ---------- Hornbach (BROWSERLOS: GraphQL marketModal, Filialbestand mit Stueckzahl) ----------
   { id: 'hornbach:portasplit', retailer: 'Hornbach', product: 'PortaSplit', tier: 'open',
-    method: 'html', via: 'fetch', maxPrice: 899,
+    method: 'hornbach', via: 'fetch', maxPrice: 899, abstractProductId: '12356554',
     url: 'https://www.hornbach.de/p/klimasplitgeraet-midea-portasplit-12-000-btu-105-m-weiss/12356554/' },
 
   // ---------- Toom (offen; aktuell 404 delisted) ----------
@@ -60,9 +60,9 @@ export const SOURCES = [
     method: 'html', via: 'fetch', maxPrice: 799,
     url: 'https://www.toom.de/p/split-klimaanlage-portasplit-cool-8000btuh/10515238' },
 
-  // ---------- Hagebau (impit; aktuell 404; Friendly Captcha auf Live-Seite moeglich) ----------
-  { id: 'hagebau:portasplit', retailer: 'Hagebau', product: 'PortaSplit', tier: 'impit',
-    method: 'html', via: 'impit', maxPrice: 899,
+  // ---------- Hagebau (BROWSERLOS: App-API products/stock, 460 Maerkte + Umkreis, kein Key) ----------
+  { id: 'hagebau:portasplit', retailer: 'Hagebau', product: 'PortaSplit', tier: 'open',
+    method: 'hagebau', via: 'fetch', maxPrice: 899,
     url: 'https://www.hagebau.de/p/midea-klimaanlage-portasplit-anP7004600334/' },
 
   // ---------- Globus (impit; aktuell 404) ----------

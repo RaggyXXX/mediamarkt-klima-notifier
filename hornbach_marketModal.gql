@@ -1,0 +1,109 @@
+query marketModal($input: StoreAndProductInput!) {
+  storeAndProduct(input: $input) {
+    __typename
+    ... on StoreAndProduct {
+      ...nearbyStoreItemListFragment
+      store {
+        __typename
+        merchantId
+        ...currentStoreItemFragment
+      }
+      product {
+        __typename
+        ... on Product {
+          offerList {
+            merchantId
+            ...currentStoreItemProductFragment
+            __typename
+          }
+          __typename
+        }
+      }
+      __typename
+    }
+  }
+}
+
+fragment nearbyStoreItemListFragment on StoreAndProduct {
+  product {
+    __typename
+    ... on Product {
+      offerList {
+        merchantId
+        ...availableQuantityFragment
+        __typename
+      }
+      __typename
+    }
+  }
+  store {
+    nearbyStoreList {
+      ...nearbyMarketItemFragment
+      __typename
+    }
+    __typename
+  }
+  __typename
+}
+
+fragment availableQuantityFragment on OfferV2 {
+  availabilityText
+  supplementaryText
+  supplementaryTextState
+  __typename
+}
+
+fragment nearbyMarketItemFragment on NearbyStore {
+  id
+  storeImage {
+    url
+    __typename
+  }
+  name
+  url
+  mainAddress {
+    addressLine1
+    addressLine2
+    __typename
+  }
+  storeId
+  distance
+  merchantId
+  __typename
+}
+
+fragment currentStoreItemFragment on Store {
+  storeImage {
+    url
+    __typename
+  }
+  name
+  url
+  mainAddress {
+    addressLine1
+    addressLine2
+    __typename
+  }
+  ...openingInfoFragment
+  __typename
+}
+
+fragment openingInfoFragment on Store {
+  url
+  openingTimeList {
+    dayInterval
+    hourInterval
+    __typename
+  }
+  specialOpeningTimeList {
+    dayInterval
+    hourInterval
+    __typename
+  }
+  __typename
+}
+
+fragment currentStoreItemProductFragment on OfferV2 {
+  ...availableQuantityFragment
+  __typename
+}

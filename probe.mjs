@@ -8,6 +8,8 @@
 // =====================================================================
 import { SOURCES } from './sources.mjs';
 import { amazonAodAvailability } from './amazon-aod.mjs';
+import { probeHagebau } from './hagebau.mjs';
+import { probeHornbach } from './hornbach.mjs';
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
@@ -135,6 +137,8 @@ export async function probeSource(s) {
   let r;
   try {
     if (s.method === 'obi-api') { r = { ...meta, ...(await probeObiApi(s)) }; }
+    else if (s.method === 'hagebau') { r = { ...meta, ...(await probeHagebau(s)) }; }
+    else if (s.method === 'hornbach') { r = { ...meta, ...(await probeHornbach(s)) }; }
     else if (s.method === 'expert') { r = { ...meta, ...(await probeExpert(s)) }; }
     else if (s.method === 'amazon') {
       // HART ueber die echte Angebotsliste (AOD) statt Katalogdaten der PDP.
