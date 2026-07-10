@@ -17,7 +17,7 @@
 import http from 'node:http';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
-import { startPortaSplit, getPortaSnapshot } from './portasplit.mjs';   // PortaSplit-Watcher (gleicher Prozess)
+import { startPortaSplit, getPortaSnapshot, setStatsSink } from './portasplit.mjs';   // PortaSplit-Watcher (gleicher Prozess)
 
 const env = process.env;
 const PORT            = env.PORT || 10000;
@@ -119,6 +119,15 @@ try{
       errors INTEGER DEFAULT 0,
       avail_seconds INTEGER DEFAULT 0
     );
+    CREATE TABLE IF NOT EXISTS source_stats(
+      source_id TEXT PRIMARY KEY, service TEXT, retailer TEXT, product TEXT,
+      checks INTEGER DEFAULT 0, errors INTEGER DEFAULT 0, restocks INTEGER DEFAULT 0,
+      last_status INTEGER, last_avail TEXT, last_price REAL, last_check TEXT, updated_at TEXT
+    );
+    CREATE TABLE IF NOT EXISTS restocks(
+      id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, service TEXT, retailer TEXT,
+      product TEXT, price REAL, gone_at TEXT, duration_sec INTEGER
+    );
   `);
   if(!dbGet('started_at')) dbSet('started_at', new Date().toISOString());
   console.log('[db] SQLite aktiv (./data.db)');
@@ -127,6 +136,7 @@ const channelSubCount = () => [...channelSubs.values()].reduce((a,s)=>a+s.size,0
 const berlinDay = (d) => new Intl.DateTimeFormat('en-CA',{timeZone:'Europe/Berlin',year:'numeric',month:'2-digit',day:'2-digit'}).format(d);
 const dailyBump = (col, n=1) => { if(db) try{ db.prepare(`INSERT INTO daily(day,${col}) VALUES(?,?) ON CONFLICT(day) DO UPDATE SET ${col}=${col}+excluded.${col}`).run(berlinDay(new Date()), n); }catch{} };
 let currentWindowId = null, availableSince = 0, windowChecks = 0;
+const PROCESS_START = Date.now();   // Uptime dieses Prozesses (Deploy), separat von "started_at" (Turso)
 
 // ---------- Turso (cloud-SQLite, DAUERHAFT) — lokale SQLite ist nur Live-Cache ----------
 // Beim Start aus Turso wiederherstellen; alle 2 Min + bei Events + bei SIGTERM flushen.
@@ -156,6 +166,8 @@ async function tursoInit(){
     {sql:'CREATE TABLE IF NOT EXISTS availability_windows(id INTEGER PRIMARY KEY, available_at TEXT, available_local TEXT, weekday TEXT, hour INTEGER, gone_at TEXT, duration_sec INTEGER, checks_during INTEGER, dm_subs INTEGER, channel_subs INTEGER, tg_subs INTEGER)'},
     {sql:'CREATE TABLE IF NOT EXISTS daily(day TEXT PRIMARY KEY, windows INTEGER, checks INTEGER, errors INTEGER, avail_seconds INTEGER)'},
     {sql:'CREATE TABLE IF NOT EXISTS subscribers(chat_id TEXT PRIMARY KEY, added_at TEXT)'},
+    {sql:'CREATE TABLE IF NOT EXISTS source_stats(source_id TEXT PRIMARY KEY, service TEXT, retailer TEXT, product TEXT, checks INTEGER, errors INTEGER, restocks INTEGER, last_status INTEGER, last_avail TEXT, last_price REAL, last_check TEXT, updated_at TEXT)'},
+    {sql:'CREATE TABLE IF NOT EXISTS restocks(id INTEGER PRIMARY KEY, ts TEXT, service TEXT, retailer TEXT, product TEXT, price REAL, gone_at TEXT, duration_sec INTEGER)'},
   ]);
   // Abo-Liste aus Turso wiederherstellen (ueberlebt Redeploy/Neustart)
   try{ for(const r of await tExec('SELECT chat_id FROM subscribers')) subscribers.add(String(r.chat_id)); }catch(e){ console.log('[turso] subs restore', e.message); }
@@ -165,6 +177,8 @@ async function tursoInit(){
     const wins = await tExec('SELECT * FROM availability_windows');
     for(const w of wins) db.prepare('INSERT OR REPLACE INTO availability_windows(id,available_at,available_local,weekday,hour,gone_at,duration_sec,checks_during,dm_subs,channel_subs,tg_subs) VALUES(?,?,?,?,?,?,?,?,?,?,?)').run(w.id,w.available_at,w.available_local,w.weekday,w.hour,w.gone_at,w.duration_sec,w.checks_during,w.dm_subs,w.channel_subs,w.tg_subs);
     for(const r of await tExec('SELECT * FROM daily')) db.prepare('INSERT OR REPLACE INTO daily(day,windows,checks,errors,avail_seconds) VALUES(?,?,?,?,?)').run(r.day,r.windows,r.checks,r.errors,r.avail_seconds);
+    for(const r of await tExec('SELECT * FROM source_stats')) db.prepare('INSERT OR REPLACE INTO source_stats(source_id,service,retailer,product,checks,errors,restocks,last_status,last_avail,last_price,last_check,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)').run(r.source_id,r.service,r.retailer,r.product,r.checks,r.errors,r.restocks,r.last_status,r.last_avail,r.last_price,r.last_check,r.updated_at);
+    for(const r of await tExec('SELECT * FROM restocks')) db.prepare('INSERT OR REPLACE INTO restocks(id,ts,service,retailer,product,price,gone_at,duration_sec) VALUES(?,?,?,?,?,?,?,?)').run(r.id,r.ts,r.service,r.retailer,r.product,r.price,r.gone_at,r.duration_sec);
     console.log(`[turso] wiederhergestellt: ${wins.length} Fenster`);
   }catch(e){ console.log('[turso] restore', e.message); }
 }
@@ -176,6 +190,8 @@ async function flushToTurso(){
     for(const r of dbAll('SELECT key,value FROM stats')) stmts.push({sql:'INSERT INTO stats(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',args:[r.key,r.value]});
     for(const w of dbAll('SELECT * FROM availability_windows')) stmts.push({sql:'INSERT OR REPLACE INTO availability_windows(id,available_at,available_local,weekday,hour,gone_at,duration_sec,checks_during,dm_subs,channel_subs,tg_subs) VALUES(?,?,?,?,?,?,?,?,?,?,?)',args:[w.id,w.available_at,w.available_local,w.weekday,w.hour,w.gone_at,w.duration_sec,w.checks_during,w.dm_subs,w.channel_subs,w.tg_subs]});
     for(const r of dbAll('SELECT * FROM daily')) stmts.push({sql:'INSERT OR REPLACE INTO daily(day,windows,checks,errors,avail_seconds) VALUES(?,?,?,?,?)',args:[r.day,r.windows,r.checks,r.errors,r.avail_seconds]});
+    for(const r of dbAll('SELECT * FROM source_stats')) stmts.push({sql:'INSERT OR REPLACE INTO source_stats(source_id,service,retailer,product,checks,errors,restocks,last_status,last_avail,last_price,last_check,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',args:[r.source_id,r.service,r.retailer,r.product,r.checks,r.errors,r.restocks,r.last_status,r.last_avail,r.last_price,r.last_check,r.updated_at]});
+    for(const r of dbAll('SELECT * FROM restocks')) stmts.push({sql:'INSERT OR REPLACE INTO restocks(id,ts,service,retailer,product,price,gone_at,duration_sec) VALUES(?,?,?,?,?,?,?,?)',args:[r.id,r.ts,r.service,r.retailer,r.product,r.price,r.gone_at,r.duration_sec]});
     if(stmts.length) await tPipeline(stmts);
   }catch(e){ console.log('[turso] flush', e.message); }
   finally{ flushing=false; }
@@ -185,6 +201,36 @@ const subscribers = new Set(CHAT_IDS);   // Empfaenger (Env + dynamisch, dauerha
 // Abo hinzufuegen/entfernen + SOFORT dauerhaft in Turso (ueberlebt Redeploy)
 const subAdd = (id) => { subscribers.add(id); if(tursoOn) tPipeline([{sql:'INSERT OR IGNORE INTO subscribers(chat_id,added_at) VALUES(?,?)',args:[id,new Date().toISOString()]}]).catch(()=>{}); };
 const subDel = (id) => { subscribers.delete(id); notified.delete(id); if(tursoOn) tPipeline([{sql:'DELETE FROM subscribers WHERE chat_id=?',args:[id]}]).catch(()=>{}); };
+
+// ---------- Quellen-Statistik: jede Probe (MediaMarkt + PortaSplit) meldet hier ----------
+const _openRestock = new Map();   // source_id -> offene restocks-Zeilen-ID
+function statsRecordProbe({ service, sourceId, retailer, product, status, avail, price=null, active=false }){
+  if(!db) return;
+  const now = new Date().toISOString();
+  const isErr = (status==null) || status===0 || status>=400 ? 1 : 0;
+  try{
+    db.prepare(`INSERT INTO source_stats(source_id,service,retailer,product,checks,errors,restocks,last_status,last_avail,last_price,last_check,updated_at)
+      VALUES(?,?,?,?,1,?,0,?,?,?,?,?)
+      ON CONFLICT(source_id) DO UPDATE SET checks=checks+1, errors=errors+?, last_status=?, last_avail=?, last_price=?, last_check=?, updated_at=?`)
+      .run(sourceId,service,retailer,product,isErr,status,avail,price,now,now, isErr,status,avail,price,now,now);
+  }catch{}
+  const open = _openRestock.get(sourceId);
+  if(active && !open){
+    try{
+      const info = db.prepare('INSERT INTO restocks(ts,service,retailer,product,price,gone_at,duration_sec) VALUES(?,?,?,?,?,NULL,NULL)').run(now,service,retailer,product,price);
+      _openRestock.set(sourceId, Number(info.lastInsertRowid));
+      db.prepare('UPDATE source_stats SET restocks=restocks+1 WHERE source_id=?').run(sourceId);
+      dbEvent('restock', `${retailer}/${product}`);
+    }catch{}
+  } else if(!active && open){
+    try{
+      const row = dbOne('SELECT ts FROM restocks WHERE id=?', open);
+      const dur = row ? Math.round((Date.now()-Date.parse(row.ts))/1000) : null;
+      db.prepare('UPDATE restocks SET gone_at=?, duration_sec=? WHERE id=?').run(now, dur, open);
+    }catch{}
+    _openRestock.delete(sourceId);
+  }
+}
 const notified    = new Set();           // wer im AKTUELLEN Fenster schon benachrichtigt wurde
 let wasAvailable = false;
 let goneStreak = 0;
@@ -193,21 +239,66 @@ let last = null, errStreak = 0, tgOffset = 0, checking = false;
 let driftAlerted = false, lastCheckAt = Date.now();   // Drift-Warnung (einmalig) + Watchdog-Heartbeat
 
 // ---------- Telegram ----------
-async function tgSend(chatId, text){
+async function tgSend(chatId, text, markup=null){
   if(!BOT_TOKEN){ console.log('[tg] (kein Token) ->', chatId, text.slice(0,40)); return; }
   try{
+    const body = { chat_id: chatId, text, disable_web_page_preview:false };
+    if(markup) body.reply_markup = markup;
     const r = await fetchT(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`,{
-      method:'POST', headers:{'content-type':'application/json'},
-      body: JSON.stringify({ chat_id: chatId, text, disable_web_page_preview:false })
+      method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(body)
     }, 8000);
     if(!r.ok) console.log('[tg] HTTP', r.status, await r.text());
   }catch(e){ console.log('[tg]', e.message); }
+}
+// Antwort auf einen Button-Klick: bestehende Nachricht editieren (kein Spam)
+async function tgEdit(chatId, msgId, text, markup=null){
+  if(!BOT_TOKEN) return;
+  try{
+    const body = { chat_id: chatId, message_id: msgId, text, disable_web_page_preview:false };
+    if(markup) body.reply_markup = markup;
+    await fetchT(`https://api.telegram.org/bot${BOT_TOKEN}/editMessageText`,{ method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(body) }, 8000);
+  }catch(e){ console.log('[tg edit]', e.message); }
+}
+async function tgAnswerCb(cbId, text=''){
+  if(!BOT_TOKEN) return;
+  try{ await fetchT(`https://api.telegram.org/bot${BOT_TOKEN}/answerCallbackQuery`,{ method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ callback_query_id: cbId, text }) }, 6000); }catch{}
+}
+// ---------- Menü + Status/Statistik-Texte ----------
+const MENU_KB = { inline_keyboard: [
+  [{text:'🟢 Status', callback_data:'status'}, {text:'📊 Statistik', callback_data:'stats'}],
+  [{text:'🔔 Abo an', callback_data:'sub'}, {text:'🔕 Abo aus', callback_data:'unsub'}],
+  [{text:'ℹ️ Hilfe', callback_data:'help'}],
+]};
+const BACK_KB = { inline_keyboard: [[{text:'⬅️ Menü', callback_data:'menu'}]] };
+const alertKb = (url) => ({ inline_keyboard: [ ...(url?[[{text:'🛒 Zum Angebot', url}]]:[]), [{text:'🔕 Abmelden', callback_data:'unsub'}] ] });
+function fmtUptime(sec){ sec=Math.max(0,Math.round(sec)); const d=Math.floor(sec/86400), h=Math.floor(sec%86400/3600), m=Math.floor(sec%3600/60);
+  return (d?`${d} T `:'')+(h||d?`${h} Std `:'')+`${m} Min`; }
+function healthText(){
+  const up = fmtUptime((Date.now()-PROCESS_START)/1000);
+  const rows = dbAll('SELECT * FROM source_stats ORDER BY service, retailer');
+  const srcLines = rows.map(r=>{
+    const good = r.last_status===200, avail = (r.last_avail==='online'||r.last_avail==='store');
+    const ico = !good ? '🔴' : (avail ? '🟢' : '⚪');
+    return `${ico} ${r.retailer} ${r.product}: ${r.last_avail||'?'} (HTTP ${r.last_status??'?'})`;
+  }).join('\n');
+  const mm = last ? (last.available?'🟢 VERFÜGBAR':(last.blocked?'🚫 blockiert':(last.pageOk?'⚪ ausverkauft':'🔴 Fehler'))) : '—';
+  return `✅ Läuft seit ${up}\n🕑 Letzter Check: ${last?.time?berlinStr(new Date(last.time)):'—'}\n\n🏬 MediaMarkt: ${mm}\n\n📡 Quellen:\n${srcLines||'(noch keine Daten – sammelt gerade)'}\n\n👥 Abonnenten: ${subscribers.size}`;
+}
+function statsText(){
+  const total = dbOne('SELECT COUNT(*) n FROM restocks')?.n||0;
+  const perR = dbAll('SELECT retailer, COUNT(*) n FROM restocks GROUP BY retailer ORDER BY n DESC').map(r=>`  • ${r.retailer}: ${r.n}`).join('\n');
+  const last5 = dbAll('SELECT retailer,product,ts,duration_sec FROM restocks ORDER BY id DESC LIMIT 5')
+    .map(r=>`  • ${last?berlinStr(new Date(r.ts)):r.ts} · ${r.retailer} ${r.product}${r.duration_sec!=null?` (${r.duration_sec}s)`:' (offen)'}`).join('\n');
+  const notifs = dbOne("SELECT COUNT(*) n FROM events WHERE type='notify'")?.n||0;
+  const errs = dbAll('SELECT retailer,product,checks,errors FROM source_stats WHERE errors>0 ORDER BY errors DESC LIMIT 6')
+    .map(r=>`  • ${r.retailer} ${r.product}: ${r.errors}/${r.checks}`).join('\n');
+  return `📊 Statistik\n\nRestocks gesamt: ${total}\n${perR||'  (noch keine)'}\n\nLetzte Fenster:\n${last5||'  (noch keine)'}\n\nMeldungen gesamt: ${notifs}\n\nQuellen mit Fehlern:\n${errs||'  keine ✅'}`;
 }
 function availText(){
   return `${availLine || pickFunny()}\n\n🟢 Jetzt kaufbar:\n${PRODUCT_URL}\n⚡ SCHNELL – ist meist in <1 Min weg!`;
 }
 async function broadcastAvailable(){
-  await Promise.all([...subscribers].map(id => tgSend(id, availText())));   // parallel -> haelt den Loop kuerzer; Frequenz per Cooldown begrenzt
+  await Promise.all([...subscribers].map(id => tgSend(id, availText(), alertKb(PRODUCT_URL))));   // parallel + Buttons
 }
 
 // ---------- Discord-Abos: /notify-me-dm (DM) + /notify-me-here (Kanal) ----------
@@ -393,6 +484,9 @@ async function check(){
              available, subs:subscribers.size, notified:notified.size };
     console.log(`[${last.time.slice(11,19)}] avail=${available} (probe=${p.available} ${confirms}/${CONFIRM_PROBES}) soldOut=${p.soldOut} http=${p.status} -> mode=${available?'ACTIVE':'idle'}`);
 
+    statsRecordProbe({ service:'MediaMarkt', sourceId:'mediamarkt', retailer:'MediaMarkt', product:'OK OAC 7022 W',
+      status:p.status, avail: available?'online':(p.pageOk?'none':'unknown'), price:null, active:available });
+
     dbInc('total_checks'); dbSet('last_check_at', last.time); dailyBump('checks');
     dbSet('last_status', !p.pageOk ? 'error' : (available ? 'available' : 'sold_out'));
     dbAdd('sum_latency_ms', p.ms||0); dbInc('latency_count');   // fuer Durchschnitts-Latenz
@@ -460,6 +554,40 @@ async function check(){
 }
 
 // ---------- Abo-Erkennung: wer dem Bot schreibt, wird aufgenommen ----------
+const HELP_TXT = 'ℹ️ Befehle:\n/menu – Menü\n/status – läuft alles sauber?\n/stats – Statistik\n/abo – anmelden\n/stop – abmelden\n\nDu bekommst automatisch eine Nachricht, sobald die MediaMarkt-Klimaanlage oder eine Midea PortaSplit verfügbar ist.';
+const MENU_TXT = '🌬️ Klima- & PortaSplit-Notifier\nWähle eine Aktion:';
+
+async function handleCommand(id, text){
+  if(text === '/stop' || text === '/abmelden' || text === '/abbestellen'){
+    if(subscribers.has(id)){ subDel(id); await tgSend(id, '🛑 Abo beendet. Mit /abo (oder 🔔 im Menü) meldest du dich wieder an.'); }
+    else await tgSend(id, 'Du hast aktuell kein Abo. Mit /abo anmelden.');
+    return;
+  }
+  if(text === '/status') return tgSend(id, healthText(), BACK_KB);
+  if(text === '/stats')  return tgSend(id, statsText(), BACK_KB);
+  if(text === '/menu' || text === '/hilfe' || text === '/help') return tgSend(id, MENU_TXT, MENU_KB);
+  // /start, /abo oder beliebige Nachricht -> anmelden (falls neu) + Menü
+  if(!subscribers.has(id)){
+    subAdd(id);
+    await tgSend(id, '✅ Abo aktiv! Du wirst benachrichtigt, sobald die MediaMarkt-Klimaanlage oder eine Midea PortaSplit verfügbar ist.', MENU_KB);
+    if(wasAvailable && !notified.has(id)){ await tgSend(id, `🟢 Aktuell VERFÜGBAR:\n${PRODUCT_URL}`); notified.add(id); }
+  } else {
+    await tgSend(id, MENU_TXT, MENU_KB);
+  }
+}
+
+async function handleCallback(cb){
+  const id = String(cb.message?.chat?.id || ''); const msgId = cb.message?.message_id; const data = cb.data || '';
+  await tgAnswerCb(cb.id);
+  if(!id || !msgId) return;
+  if(data === 'status') return tgEdit(id, msgId, healthText(), BACK_KB);
+  if(data === 'stats')  return tgEdit(id, msgId, statsText(), BACK_KB);
+  if(data === 'menu')   return tgEdit(id, msgId, MENU_TXT, MENU_KB);
+  if(data === 'help')   return tgEdit(id, msgId, HELP_TXT, BACK_KB);
+  if(data === 'sub'){   if(!subscribers.has(id)) subAdd(id); return tgEdit(id, msgId, '🔔 Abo aktiv – du wirst bei Verfügbarkeit benachrichtigt.', BACK_KB); }
+  if(data === 'unsub'){ if(subscribers.has(id)) subDel(id); return tgEdit(id, msgId, '🔕 Abo beendet. Über 🔔 Abo an (oder /abo) wieder anmelden.', BACK_KB); }
+}
+
 async function pollUpdates(){
   if(!BOT_TOKEN) return;
   try{
@@ -467,22 +595,9 @@ async function pollUpdates(){
     const d = await r.json();
     for(const u of d.result||[]){
       tgOffset = u.update_id + 1;
+      if(u.callback_query){ await handleCallback(u.callback_query); continue; }
       const chat = u.message?.chat; if(!chat) continue;
-      const id = String(chat.id);
-      const text = (u.message.text || '').trim().toLowerCase();
-      if(text === '/stop' || text === '/abmelden' || text === '/abbestellen'){
-        if(subscribers.has(id)){ subDel(id); await tgSend(id, '🛑 Abo beendet. Mit /abo meldest du dich jederzeit wieder an.'); }
-        else await tgSend(id, 'Du hast aktuell kein Abo. Mit /abo anmelden.');
-        continue;
-      }
-      // /start, /abo oder irgendeine Nachricht -> anmelden
-      if(!subscribers.has(id)){
-        subAdd(id);
-        await tgSend(id, '✅ Abo aktiv! Du bekommst eine Nachricht, sobald die MediaMarkt-Klimaanlage oder eine Midea PortaSplit verfügbar ist.\n\nBefehle:\n/abo – anmelden\n/stop – abmelden');
-        if(wasAvailable && !notified.has(id)){ await tgSend(id, `🟢 Aktuell VERFÜGBAR:\n${PRODUCT_URL}`); notified.add(id); }
-      } else if(text === '/abo' || text === '/start'){
-        await tgSend(id, 'ℹ️ Dein Abo ist bereits aktiv. Mit /stop kannst du dich abmelden.');
-      }
+      await handleCommand(String(chat.id), (u.message.text || '').trim().toLowerCase());
     }
   }catch(e){ console.log('[updates]', e.message); }
 }
@@ -527,14 +642,21 @@ process.on('uncaughtException',  e => console.log('[uncaughtException]',  (e && 
 // ---------- PortaSplit-Watcher: laeuft im selben Prozess, meldet ueber dieselben Kanaele ----------
 async function portaAlert({ title, message, url }){
   const text = `${title}\n${message}${url ? '\n'+url : ''}`;
-  await Promise.all([...subscribers].map(id => tgSend(id, text)));        // Telegram-Empfaenger
+  await Promise.all([...subscribers].map(id => tgSend(id, text, alertKb(url))));   // Telegram-Empfaenger + Buttons
   await Promise.all([...dmSubs].map(uid => discordDM(uid, text)));        // Discord-DM-Abos
   if(DISCORD_BOT_TOKEN && DISCORD_ROLE_ID && DISCORD_NOTIFY_CHANNEL_ID){  // Discord Rollen-Ping (eigener Text)
     await fetchT(`https://discord.com/api/v10/channels/${DISCORD_NOTIFY_CHANNEL_ID}/messages`, { method:'POST', headers:dHeaders(),
       body: JSON.stringify({ content:`<@&${DISCORD_ROLE_ID}>\n${text}`, allowed_mentions:{ roles:[DISCORD_ROLE_ID] } }) }, 8000).catch(()=>{});
   }
 }
+setStatsSink(statsRecordProbe);   // PortaSplit-Proben in die Quellen-Statistik
 startPortaSplit(portaAlert);
+
+// Bot-Befehlsmenü setzen (best effort, bei jedem Deploy)
+if(BOT_TOKEN) fetchT(`https://api.telegram.org/bot${BOT_TOKEN}/setMyCommands`, { method:'POST', headers:{'content-type':'application/json'},
+  body: JSON.stringify({ commands:[
+    {command:'menu',description:'Menü öffnen'}, {command:'status',description:'Läuft alles sauber?'},
+    {command:'stats',description:'Statistik'}, {command:'abo',description:'Benachrichtigungen an'}, {command:'stop',description:'Benachrichtigungen aus'} ] }) }, 8000).catch(()=>{});
 
 // ---------- HTTP ----------
 let DASHBOARD=''; try{ DASHBOARD = fs.readFileSync('./public/index.html','utf8'); }catch(e){ console.log('[ui] index.html fehlt:', e.message); }
@@ -601,7 +723,11 @@ const server = http.createServer(async (req,res)=>{
         last_available_at: dbGet('last_available_at'), last_check_at: dbGet('last_check_at'),
         last_status: dbGet('last_status'), started_at: dbGet('started_at'),
         currently_available: wasAvailable,
+        uptime_sec: Math.round((Date.now()-PROCESS_START)/1000),
+        subscribers: subscribers.size,
       },
+      sources:  dbAll('SELECT * FROM source_stats ORDER BY service, retailer'),
+      restocks: dbAll('SELECT * FROM restocks ORDER BY id DESC LIMIT 50'),
       summary: dbOne('SELECT COUNT(*) windows, AVG(duration_sec) avg_sec, MIN(duration_sec) min_sec, MAX(duration_sec) max_sec, SUM(duration_sec) total_sec FROM availability_windows WHERE duration_sec IS NOT NULL'),
       byHour:    dbAll('SELECT hour, COUNT(*) windows, ROUND(AVG(duration_sec)) avg_sec FROM availability_windows GROUP BY hour ORDER BY hour'),
       byWeekday: dbAll('SELECT weekday, COUNT(*) windows, ROUND(AVG(duration_sec)) avg_sec FROM availability_windows GROUP BY weekday'),

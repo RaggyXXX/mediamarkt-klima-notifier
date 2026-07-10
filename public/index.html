@@ -47,7 +47,13 @@
   <h2>Nach Wochentag</h2>
   <div class="panel"><div class="bars" id="byday"></div></div>
 
-  <h2>Letzte Verfügbarkeits-Fenster</h2>
+  <h2>Quellen-Gesundheit (alle Dienste)</h2>
+  <div class="panel"><table id="sources"><thead><tr><th>Dienst</th><th>Händler / Produkt</th><th class="r">HTTP</th><th>Zustand</th><th class="r">Checks</th><th class="r">Fehler</th><th class="r">Restocks</th></tr></thead><tbody></tbody></table></div>
+
+  <h2>Letzte Restocks (alle Quellen)</h2>
+  <div class="panel"><table id="restocks"><thead><tr><th>Wann (UTC)</th><th>Dienst</th><th>Händler / Produkt</th><th class="r">Preis</th><th class="r">Dauer</th></tr></thead><tbody></tbody></table></div>
+
+  <h2>MediaMarkt: Verfügbarkeits-Fenster</h2>
   <div class="panel"><table id="windows"><thead><tr><th>Wann (Berlin)</th><th>Wochentag</th><th class="r">Verfügbar für</th><th class="r">Checks</th></tr></thead><tbody></tbody></table></div>
 
   <h2>Letzte Ereignisse</h2>
@@ -59,6 +65,7 @@
 <script>
 const $ = s => document.querySelector(s);
 const fmtDur = s => s==null?'–':(s>=60?Math.floor(s/60)+'m '+(s%60)+'s':s+'s');
+const fmtUp = s => { s=s||0; const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60); return (d?d+' T ':'')+(h||d?h+' Std ':'')+m+' Min'; };
 const fmtT = iso => iso? iso.slice(0,16).replace('T',' ')+' UTC':'–';
 
 function bars(el, data, labelFn, countFn){
@@ -84,7 +91,8 @@ async function load(){
     ['ø Verfügbar-Dauer', fmtDur(sum.avg_sec!=null?Math.round(sum.avg_sec):null)],
     ['kürzeste / längste', fmtDur(sum.min_sec)+' <small>/</small> '+fmtDur(sum.max_sec)],
     ['Zuletzt verfügbar', '<span style="font-size:15px">'+fmtT(c.last_available_at)+'</span>'],
-    ['Läuft seit', '<span style="font-size:15px">'+fmtT(c.started_at)+'</span>'],
+    ['Uptime (Deploy)', fmtUp(c.uptime_sec)],
+    ['Abonnenten', (c.subscribers??0)],
   ];
   $('#cards').innerHTML = cards.map(([k,v])=>'<div class="card"><div class="k">'+k+'</div><div class="v">'+v+'</div></div>').join('');
 
@@ -96,6 +104,16 @@ async function load(){
   const order=['Mo','Di','Mi','Do','Fr','Sa','So'];
   const byD = Object.fromEntries((s.byWeekday||[]).map(r=>[(r.weekday||'').replace('.',''), r.windows]));
   bars($('#byday'), order.map(d=>({d, n:byD[d]||0})), d=>d.d, d=>d.n);
+
+  $('#sources tbody').innerHTML = (s.sources||[]).map(x=>{
+    const good = x.last_status===200, avail=(x.last_avail==='online'||x.last_avail==='store');
+    const ico = !good?'🔴':(avail?'🟢':'⚪');
+    return '<tr><td>'+x.service+'</td><td>'+x.retailer+' '+x.product+'</td><td class="r">'+(x.last_status??'–')+'</td><td>'+ico+' '+(x.last_avail||'?')+'</td><td class="r">'+(x.checks||0)+'</td><td class="r">'+(x.errors||0)+'</td><td class="r">'+(x.restocks||0)+'</td></tr>';
+  }).join('') || '<tr><td colspan="7" class="mut">sammelt…</td></tr>';
+
+  $('#restocks tbody').innerHTML = (s.restocks||[]).map(r=>
+    '<tr><td>'+fmtT(r.ts)+'</td><td>'+r.service+'</td><td>'+r.retailer+' '+r.product+'</td><td class="r">'+(r.price!=null?r.price+' €':'–')+'</td><td class="r">'+(r.duration_sec!=null?fmtDur(r.duration_sec):'<span class=mut>offen</span>')+'</td></tr>'
+  ).join('') || '<tr><td colspan="5" class="mut">Noch keine Restocks erfasst.</td></tr>';
 
   $('#windows tbody').innerHTML = (s.windows||[]).map(w=>
     '<tr><td>'+(w.available_local||'–')+'</td><td>'+(w.weekday||'–')+'</td><td class="r">'+(w.duration_sec!=null?fmtDur(w.duration_sec):'<span class=mut>läuft…</span>')+'</td><td class="r">'+(w.checks_during||0)+'</td></tr>'

@@ -30,6 +30,8 @@ const log = (...a) => console.log('[porta]', ...a);
 
 const state = {};   // id -> { active, avail, goneStreak, lastStatus, lastSeen }
 let ALERT = async () => {};
+let STATS = () => {};   // Stats-Senke: bekommt jede Probe (server.js verdrahtet sie)
+export function setStatsSink(fn) { if (typeof fn === 'function') STATS = fn; }
 
 function label(a) { return { online: 'ONLINE bestellbar', store: 'im Markt vorrätig', 'store-remote': 'Markt zu weit', none: 'ausverkauft', overpriced: 'überteuert', unknown: 'unklar' }[a] || a; }
 
@@ -77,6 +79,10 @@ async function handle(s, r) {
     st.goneStreak = 0;
   }
   st.lastStatus = r.status;
+  try {
+    STATS({ service: 'PortaSplit', sourceId: s.id, retailer: s.retailer, product: s.product,
+      status: r.status, avail: r.avail, price: r.priceNum ?? r.price ?? null, url: s.url, active: st.active === true });
+  } catch {}
 }
 
 async function loopSource(s) {
