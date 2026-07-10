@@ -155,7 +155,10 @@ async function tursoInit(){
     {sql:'CREATE TABLE IF NOT EXISTS stats(key TEXT PRIMARY KEY, value TEXT)'},
     {sql:'CREATE TABLE IF NOT EXISTS availability_windows(id INTEGER PRIMARY KEY, available_at TEXT, available_local TEXT, weekday TEXT, hour INTEGER, gone_at TEXT, duration_sec INTEGER, checks_during INTEGER, dm_subs INTEGER, channel_subs INTEGER, tg_subs INTEGER)'},
     {sql:'CREATE TABLE IF NOT EXISTS daily(day TEXT PRIMARY KEY, windows INTEGER, checks INTEGER, errors INTEGER, avail_seconds INTEGER)'},
+    {sql:'CREATE TABLE IF NOT EXISTS subscribers(chat_id TEXT PRIMARY KEY, added_at TEXT)'},
   ]);
+  // Abo-Liste aus Turso wiederherstellen (ueberlebt Redeploy/Neustart)
+  try{ for(const r of await tExec('SELECT chat_id FROM subscribers')) subscribers.add(String(r.chat_id)); }catch(e){ console.log('[turso] subs restore', e.message); }
   if(!db) return;
   try{
     for(const r of await tExec('SELECT key,value FROM stats')) dbSet(r.key, r.value);
@@ -178,7 +181,10 @@ async function flushToTurso(){
   finally{ flushing=false; }
 }
 
-const subscribers = new Set(CHAT_IDS);   // Empfaenger (Env + dynamisch)
+const subscribers = new Set(CHAT_IDS);   // Empfaenger (Env + dynamisch, dauerhaft in Turso)
+// Abo hinzufuegen/entfernen + SOFORT dauerhaft in Turso (ueberlebt Redeploy)
+const subAdd = (id) => { subscribers.add(id); if(tursoOn) tPipeline([{sql:'INSERT OR IGNORE INTO subscribers(chat_id,added_at) VALUES(?,?)',args:[id,new Date().toISOString()]}]).catch(()=>{}); };
+const subDel = (id) => { subscribers.delete(id); notified.delete(id); if(tursoOn) tPipeline([{sql:'DELETE FROM subscribers WHERE chat_id=?',args:[id]}]).catch(()=>{}); };
 const notified    = new Set();           // wer im AKTUELLEN Fenster schon benachrichtigt wurde
 let wasAvailable = false;
 let goneStreak = 0;
@@ -463,10 +469,19 @@ async function pollUpdates(){
       tgOffset = u.update_id + 1;
       const chat = u.message?.chat; if(!chat) continue;
       const id = String(chat.id);
+      const text = (u.message.text || '').trim().toLowerCase();
+      if(text === '/stop' || text === '/abmelden' || text === '/abbestellen'){
+        if(subscribers.has(id)){ subDel(id); await tgSend(id, '🛑 Abo beendet. Mit /abo meldest du dich jederzeit wieder an.'); }
+        else await tgSend(id, 'Du hast aktuell kein Abo. Mit /abo anmelden.');
+        continue;
+      }
+      // /start, /abo oder irgendeine Nachricht -> anmelden
       if(!subscribers.has(id)){
-        subscribers.add(id);
-        await tgSend(id, '✅ Abo aktiv! Du wirst benachrichtigt, sobald die Klimaanlage lieferbar ist.');
+        subAdd(id);
+        await tgSend(id, '✅ Abo aktiv! Du bekommst eine Nachricht, sobald die MediaMarkt-Klimaanlage oder eine Midea PortaSplit verfügbar ist.\n\nBefehle:\n/abo – anmelden\n/stop – abmelden');
         if(wasAvailable && !notified.has(id)){ await tgSend(id, `🟢 Aktuell VERFÜGBAR:\n${PRODUCT_URL}`); notified.add(id); }
+      } else if(text === '/abo' || text === '/start'){
+        await tgSend(id, 'ℹ️ Dein Abo ist bereits aktiv. Mit /stop kannst du dich abmelden.');
       }
     }
   }catch(e){ console.log('[updates]', e.message); }
