@@ -12,6 +12,14 @@ import { probeHagebau } from './hagebau.mjs';
 import { probeHornbach } from './hornbach.mjs';
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+// Browser-aehnliche Header -> reduziert bot-basierte 403/503 (hilft nicht gegen reine IP-Blocks).
+const BROWSER_HEADERS = {
+  'user-agent': UA, 'accept-language': 'de-DE,de;q=0.9,en;q=0.8',
+  'sec-ch-ua': '"Chromium";v="131", "Not_A Brand";v="24", "Google Chrome";v="131"',
+  'sec-ch-ua-mobile': '?0', 'sec-ch-ua-platform': '"Windows"',
+  'sec-fetch-dest': 'empty', 'sec-fetch-mode': 'cors', 'sec-fetch-site': 'same-origin',
+  'upgrade-insecure-requests': '1',
+};
 
 // ---- Standort/Umkreis (einstellbar) ----
 // Default: Hameln, 30 km. Marktabholung wird nur gemeldet, wenn eine Filiale
@@ -30,7 +38,7 @@ async function impitFetch(url) {
   return { status: r.status, body: await r.text() };
 }
 async function plainFetch(url, accept = 'text/html,application/xhtml+xml') {
-  const r = await fetch(url, { headers: { 'user-agent': UA, 'accept-language': 'de-DE,de;q=0.9', accept }, redirect: 'follow' });
+  const r = await fetch(url, { headers: { ...BROWSER_HEADERS, accept }, redirect: 'follow' });
   return { status: r.status, body: await r.text() };
 }
 
@@ -78,7 +86,7 @@ function schemaToAvail(s) {
 async function probeObiApi(s) {
   const plz = HOME_PLZ;
   const r = await fetch(`https://www.obi.de/api/pdp/v1/availability/${s.articleId}?postalCode=${plz}`,
-    { headers: { 'user-agent': UA, accept: 'application/json' } });
+    { headers: { ...BROWSER_HEADERS, accept: 'application/json', referer: s.url || 'https://www.obi.de/' } });
   if (r.status !== 200) return { status: r.status, avail: 'unknown', note: 'HTTP ' + r.status };
   let j = {}; try { j = JSON.parse(await r.text()); } catch {}
   const online = (j.deliveryDataPerSeller || []).length > 0;

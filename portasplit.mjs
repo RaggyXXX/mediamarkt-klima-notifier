@@ -14,9 +14,11 @@ import { probeSource, isAvailable } from './probe.mjs';
 const env = process.env;
 const num = (k, d) => Math.max(1, parseInt(env[k] || d, 10));
 const CFG = {
-  openSec: num('PS_OPEN_SEC', 4),
-  impitSec: num('PS_IMPIT_SEC', 12),
-  amazonSec: num('PS_AMAZON_SEC', 45),
+  // Vom Render-Datacenter aus rate-limiten die Haendler (OBI 429 etc.) -> ruhigerer Takt.
+  // Auf einem Wohn-IP-Host (Pi/PC) kann man per Env wieder schneller pollen.
+  openSec: num('PS_OPEN_SEC', 20),
+  impitSec: num('PS_IMPIT_SEC', 25),
+  amazonSec: num('PS_AMAZON_SEC', 60),
   jitterPct: num('PS_JITTER_PCT', 30),
   confirmProbes: num('PS_CONFIRM_PROBES', 3),
   confirmGapMs: num('PS_CONFIRM_GAP_MS', 1200),
